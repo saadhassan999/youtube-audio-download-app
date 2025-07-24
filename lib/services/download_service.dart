@@ -27,6 +27,7 @@ class DownloadService {
   static final ValueNotifier<Map<String, double>> downloadProgressNotifier = ValueNotifier({});
   static final ValueNotifier<bool> isAnyDownloadInProgress = ValueNotifier<bool>(false);
   static final Map<String, bool> _downloadCancelFlags = {};
+  static final Set<String> _activeDownloads = {};
 
   static Future<void> init() async {
     if (!_audioPlayerInitialized) {
@@ -97,7 +98,13 @@ class DownloadService {
     required String channelName,
     required String thumbnailUrl,
     void Function(int received, int total)? onProgress,
+    bool resume = false,
   }) async {
+    if (_activeDownloads.contains(videoId)) {
+      // Already running
+      return null;
+    }
+    _activeDownloads.add(videoId);
     final dir = await getApplicationDocumentsDirectory();
     final filePath = '${dir.path}/$videoId.mp3';
     final file = File(filePath);
@@ -107,21 +114,23 @@ class DownloadService {
       await oldM4a.delete();
     }
     _downloadCancelFlags[videoId] = false;
-    // Insert a 'downloading' record before starting the download
-    final downloadingVideo = DownloadedVideo(
-      videoId: videoId,
-      title: title,
-      filePath: filePath,
-      size: 0,
-      duration: null,
-      channelName: channelName,
-      thumbnailUrl: thumbnailUrl,
-      downloadedAt: DateTime.now(),
-      status: 'downloading',
-    );
-    await DatabaseService.instance.addDownloadedVideo(downloadingVideo);
-    downloadedVideosChanged.value++;
-    isAnyDownloadInProgress.value = true;
+    // Only insert a 'downloading' record if not resuming
+    if (!resume) {
+      final downloadingVideo = DownloadedVideo(
+        videoId: videoId,
+        title: title,
+        filePath: filePath,
+        size: 0,
+        duration: null,
+        channelName: channelName,
+        thumbnailUrl: thumbnailUrl,
+        downloadedAt: DateTime.now(),
+        status: 'downloading',
+      );
+      await DatabaseService.instance.addDownloadedVideo(downloadingVideo);
+      downloadedVideosChanged.value++;
+      isAnyDownloadInProgress.value = true;
+    }
     final yt = YoutubeExplode();
     try {
       // Get video manifest (API updated for v2.x)
@@ -129,9 +138,21 @@ class DownloadService {
       final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
       if (audioStreamInfo == null) {
         print('No audio stream found for video: $videoId');
-        // Remove the 'downloading' record
-        await DatabaseService.instance.deleteDownloadedVideo(videoId);
+        // Mark as failed instead of deleting
+        final failedVideo = DownloadedVideo(
+          videoId: videoId,
+          title: title,
+          filePath: filePath,
+          size: 0,
+          duration: null,
+          channelName: channelName,
+          thumbnailUrl: thumbnailUrl,
+          downloadedAt: DateTime.now(),
+          status: 'failed',
+        );
+        await DatabaseService.instance.addDownloadedVideo(failedVideo);
         downloadedVideosChanged.value++;
+        _activeDownloads.remove(videoId);
         return null;
       }
       // Download audio stream (API updated for v2.x)
@@ -153,6 +174,7 @@ class DownloadService {
           newMap.remove(videoId);
           downloadProgressNotifier.value = newMap;
           _downloadCancelFlags.remove(videoId);
+          _activeDownloads.remove(videoId);
           return null;
         }
         output.add(data);
@@ -177,9 +199,21 @@ class DownloadService {
       print('Downloaded file size: $fileSize bytes');
       if (!exists || fileSize == 0) {
         print('Download failed or file is empty. Not adding to database.');
-        // Remove the 'downloading' record
-        await DatabaseService.instance.deleteDownloadedVideo(videoId);
+        // Mark as failed instead of deleting
+        final failedVideo = DownloadedVideo(
+          videoId: videoId,
+          title: title,
+          filePath: filePath,
+          size: 0,
+          duration: null,
+          channelName: channelName,
+          thumbnailUrl: thumbnailUrl,
+          downloadedAt: DateTime.now(),
+          status: 'failed',
+        );
+        await DatabaseService.instance.addDownloadedVideo(failedVideo);
         downloadedVideosChanged.value++;
+        _activeDownloads.remove(videoId);
         return null;
       }
 
@@ -197,18 +231,16 @@ class DownloadService {
       );
       await DatabaseService.instance.addDownloadedVideo(completedVideo);
       downloadedVideosChanged.value++;
-      // Check if any downloads are still in progress
       await _updateIsAnyDownloadInProgress();
-      // Show notification after successful download
       await NotificationService.showNotification(
         title: 'Download Complete',
         body: 'Successfully downloaded: $title',
       );
-      // Remove progress entry on completion
       final newMap = Map<String, double>.from(downloadProgressNotifier.value);
       newMap.remove(videoId);
       downloadProgressNotifier.value = newMap;
       _downloadCancelFlags.remove(videoId);
+      _activeDownloads.remove(videoId);
       return completedVideo;
     } catch (e) {
       print('Audio download error: $e');
@@ -216,16 +248,26 @@ class DownloadService {
       if (await file.exists()) {
         await file.delete();
       }
-      // Remove the 'downloading' record
-      await DatabaseService.instance.deleteDownloadedVideo(videoId);
+      // Mark as failed instead of deleting
+      final failedVideo = DownloadedVideo(
+        videoId: videoId,
+        title: title,
+        filePath: filePath,
+        size: 0,
+        duration: null,
+        channelName: channelName,
+        thumbnailUrl: thumbnailUrl,
+        downloadedAt: DateTime.now(),
+        status: 'failed',
+      );
+      await DatabaseService.instance.addDownloadedVideo(failedVideo);
       downloadedVideosChanged.value++;
-      // Check if any downloads are still in progress
       await _updateIsAnyDownloadInProgress();
-      // Remove progress entry on failure
       final newMap = Map<String, double>.from(downloadProgressNotifier.value);
       newMap.remove(videoId);
       downloadProgressNotifier.value = newMap;
       _downloadCancelFlags.remove(videoId);
+      _activeDownloads.remove(videoId);
       return null;
     }
   }
@@ -368,5 +410,54 @@ class DownloadService {
   static Future<void> _updateIsAnyDownloadInProgress() async {
     final all = await DatabaseService.instance.getDownloadedVideos();
     isAnyDownloadInProgress.value = all.any((v) => v.status == 'downloading');
+  }
+
+  // Resume any downloads that are in-progress in the DB (e.g., after navigation or app restart)
+  static Future<void> resumeIncompleteDownloads() async {
+    final inProgress = (await DatabaseService.instance.getDownloadedVideos())
+        .where((v) => v.status == 'downloading')
+        .toList();
+    for (final video in inProgress) {
+      if (_activeDownloads.contains(video.videoId)) {
+        // Reattach progress notifier by reading file size and total size
+        try {
+          final dir = await getApplicationDocumentsDirectory();
+          final filePath = '${dir.path}/${video.videoId}.mp3';
+          final file = File(filePath);
+          int received = await file.exists() ? await file.length() : 0;
+          // Get total size from YouTube
+          final yt = YoutubeExplode();
+          final manifest = await yt.videos.streams.getManifest(video.videoId);
+          final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
+          final total = audioStreamInfo?.size.totalBytes ?? 0;
+          yt.close();
+          if (total > 0) {
+            final progress = received / total;
+            downloadProgressNotifier.value = {
+              ...downloadProgressNotifier.value,
+              video.videoId: progress > 1.0 ? 1.0 : progress,
+            };
+          }
+        } catch (e) {
+          // If we can't get progress, set to 0.0
+          downloadProgressNotifier.value = {
+            ...downloadProgressNotifier.value,
+            video.videoId: 0.0,
+          };
+        }
+        continue;
+      }
+      // If not running, start/resume the download
+      if (!downloadProgressNotifier.value.containsKey(video.videoId)) {
+        downloadAudio(
+          videoId: video.videoId,
+          videoUrl: 'https://www.youtube.com/watch?v=${video.videoId}',
+          title: video.title,
+          channelName: video.channelName,
+          thumbnailUrl: video.thumbnailUrl,
+          resume: true,
+        );
+      }
+    }
   }
 } 

@@ -86,6 +86,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen> with 
       ));
       await _loadChannels();
       await _fetchAndSetVideos(channelId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Channel added: $channelName')),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to add channel: $e')));
@@ -95,6 +99,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen> with 
   void _onChannelSelected(Channel channel) async {
     await _loadChannels();
     await _fetchAndSetVideos(channel.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Channel selected: ${channel.name}')),
+    );
   }
 
   Future<void> _fetchAndSetVideos(String channelId) async {
@@ -217,6 +225,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen> with 
           lastVideoId: lastDownloadedId,
         );
         await DatabaseService.instance.updateChannel(updatedChannel);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Channel updated: ${channel.name}')),
+        );
       }
 
       // Show final summary
@@ -302,6 +314,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen> with 
                 lastVideoId: lastDownloadedId,
               );
               await DatabaseService.instance.updateChannel(updatedChannel);
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Channel updated: ${channel.name}')),
+              );
             }
           }
 
@@ -494,6 +510,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen> with 
                           _channelVideos.remove(channel.id);
                         });
                         _loadChannels();
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Channel removed: ${channel.name}')),
+                        );
                         }
                       },
                                     ),

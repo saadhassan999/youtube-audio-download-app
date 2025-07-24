@@ -18,6 +18,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const fetchTask = 'fetchNewVideosTask';
 
+final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
+
 Future<void> _requestNotificationPermission() async {
   try {
     if (Platform.isAndroid) {
@@ -198,6 +200,7 @@ void main() async {
   }
   
   await DownloadService.init();
+  await DownloadService.resumeIncompleteDownloads();
   await DatabaseService.instance.db;
   await NotificationService.init();
   if (Platform.isAndroid) {
@@ -234,6 +237,7 @@ class MyApp extends StatelessWidget {
         '/player': (_) => AudioPlayerScreen(),
       },
       debugShowCheckedModeBanner: false,
+      navigatorObservers: [routeObserver],
     );
   }
 } 

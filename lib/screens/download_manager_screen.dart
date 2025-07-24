@@ -10,68 +10,72 @@ import 'package:just_audio/just_audio.dart';
 import 'dart:async';
 import 'package:flutter_media_metadata/flutter_media_metadata.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter/widgets.dart';
+import '../../main.dart';
 
 class DownloadManagerScreen extends StatefulWidget {
   @override
   _DownloadManagerScreenState createState() => _DownloadManagerScreenState();
 }
 
-class _DownloadManagerScreenState extends State<DownloadManagerScreen> {
-  List<DownloadedVideo> _downloadedVideos = [];
-  static List<DownloadedVideo> _cachedCompletedDownloads = [];
-  bool _isLoading = true; // Start as true for the very first load
-  bool _hasEverLoadedCompleted = false;
-  bool _hasInProgressDownloads = false;
-  bool _instantInProgress = false;
-  List<File> _orphanedFiles = [];
+class _DownloadManagerScreenState extends State<DownloadManagerScreen> with RouteAware {
+  // Static cache for instant load
+  static List<DownloadedVideo> _cachedVideos = [];
+  final ValueNotifier<List<DownloadedVideo>> downloadedVideosNotifier = ValueNotifier([]);
+  bool _isLoading = true;
   bool _scannedForOrphans = false;
+  List<File> _orphanedFiles = [];
 
   @override
   void initState() {
     super.initState();
-    // If we have a cache from a previous session, use it immediately
-    if (_cachedCompletedDownloads.isNotEmpty) {
-      _hasEverLoadedCompleted = true;
+    // Show cached data instantly
+    if (_cachedVideos.isNotEmpty) {
+      downloadedVideosNotifier.value = List.from(_cachedVideos);
       _isLoading = false;
     }
-    // Listen to instant in-progress notifier
-    _instantInProgress = DownloadService.isAnyDownloadInProgress.value;
     DownloadService.isAnyDownloadInProgress.addListener(_instantInProgressListener);
     _loadDownloadedVideos();
     DownloadService.downloadedVideosChanged.addListener(_loadDownloadedVideos);
     _scanForOrphanedFiles();
+    DownloadService.resumeIncompleteDownloads();
   }
 
   void _instantInProgressListener() {
-    if (mounted) setState(() {
-      _instantInProgress = DownloadService.isAnyDownloadInProgress.value;
-    });
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    routeObserver.subscribe(this, ModalRoute.of(context) as PageRoute);
   }
 
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     DownloadService.downloadedVideosChanged.removeListener(_loadDownloadedVideos);
     DownloadService.isAnyDownloadInProgress.removeListener(_instantInProgressListener);
     super.dispose();
   }
 
+  @override
+  void didPopNext() {
+    DownloadService.resumeIncompleteDownloads();
+    _loadDownloadedVideos();
+  }
+
   Future<void> _loadDownloadedVideos() async {
-    print('[DownloadManagerScreen] Loading downloaded videos...');
     final videos = await DatabaseService.instance.getDownloadedVideos();
-    print('[DownloadManagerScreen] Loaded ${videos.length} videos from DB');
-    await Future.delayed(Duration(milliseconds: 100));
-    final completed = videos.where((v) => v.status == 'completed').toList();
-    final inProgress = videos.where((v) => v.status == 'downloading').toList();
-    print('[DownloadManagerScreen] Completed downloads: ${completed.length}, In-progress: ${inProgress.length}');
-    if (mounted) setState(() {
-      _downloadedVideos = [...inProgress, ...completed];
-      _hasInProgressDownloads = inProgress.isNotEmpty;
-      if (completed.isNotEmpty) {
-        _cachedCompletedDownloads = completed;
-        _hasEverLoadedCompleted = true;
-      }
-      _isLoading = false;
-    });
+    _cachedVideos = List.from(videos); // update cache
+    downloadedVideosNotifier.value = List.from(videos);
+    if (_isLoading) {
+      setState(() {
+        _isLoading = false;
+      });
+    } else {
+      setState(() {});
+    }
   }
 
   Future<void> _scanForOrphanedFiles() async {
@@ -120,9 +124,7 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final showSpinner = _isLoading && !_hasEverLoadedCompleted && _cachedCompletedDownloads.isEmpty && !_instantInProgress;
-    final displayList = _downloadedVideos.isNotEmpty ? _downloadedVideos : _cachedCompletedDownloads;
-    print('[DownloadManagerScreen] build: showSpinner=$showSpinner, displayList.length=${displayList.length}, _isLoading=$_isLoading, _hasEverLoadedCompleted=$_hasEverLoadedCompleted, _hasInProgressDownloads=$_hasInProgressDownloads, _instantInProgress=$_instantInProgress');
+    final showSpinner = _isLoading && downloadedVideosNotifier.value.isEmpty;
     return Scaffold(
       appBar: AppBar(
         title: Text('Downloads', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22)),
@@ -156,90 +158,77 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
-        children: [
+                children: [
                   Icon(Icons.library_music, color: Colors.red[600]),
                   SizedBox(width: 8),
                   Text('Downloaded Audio', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                 ],
               ),
             ),
-          Expanded(
+            Expanded(
               child: showSpinner
                   ? Center(child: CircularProgressIndicator())
-                  : ValueListenableBuilder<Map<String, double>>(
-                      valueListenable: DownloadService.downloadProgressNotifier,
-                      builder: (context, progressMap, _) {
-                        // Always fetch the latest in-progress downloads from the DB and progressMap
-                        final allVideoIds = <String>{};
-                        final inProgressVideos = <DownloadedVideo>[];
-                        // Add all DB in-progress
-                        for (final v in _downloadedVideos.where((v) => v.status == 'downloading')) {
-                          inProgressVideos.add(v);
-                          allVideoIds.add(v.videoId);
-                        }
-                        // Add any in-progress from progressMap not in DB list
-                        for (final entry in progressMap.entries) {
-                          if (!allVideoIds.contains(entry.key)) {
-                            // Try to get info from DB (should be present)
-                            final idx = _downloadedVideos.indexWhere((v) => v.videoId == entry.key);
-                            if (idx != -1) {
-                              inProgressVideos.add(_downloadedVideos[idx]);
-                              allVideoIds.add(entry.key);
-                            }
-                          }
-                        }
-                        // If still missing, fetch from DB (for immediate UI update after manual start)
-                        for (final videoId in progressMap.keys) {
-                          if (!allVideoIds.contains(videoId)) {
-                            // This is a new in-progress download not yet in _downloadedVideos
-                            // Try to fetch from DB synchronously (not ideal, but for UI immediacy)
-                            // (In practice, _loadDownloadedVideos should be called after manual start)
-                          }
-                        }
-                        final completedList = _downloadedVideos.where((v) => v.status == 'completed').toList();
-                        final hasAny = inProgressVideos.isNotEmpty || completedList.isNotEmpty;
-                        if (!hasAny) {
-                          return Center(
-                            child: Text('No downloads yet.', style: TextStyle(fontSize: 16, color: Colors.grey[600])),
-                          );
-                        }
-                        return ListView.separated(
+                  : ValueListenableBuilder<List<DownloadedVideo>>(
+                      valueListenable: downloadedVideosNotifier,
+                      builder: (context, videos, _) {
+                        final inProgressVideos = videos.where((v) => v.status == 'downloading').toList();
+                        final completedList = videos.where((v) => v.status == 'completed').toList();
+                        return ListView(
                           padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          separatorBuilder: (_, __) => SizedBox(height: 10),
-                          itemCount: inProgressVideos.length + completedList.length,
-                    itemBuilder: (context, i) {
-                            if (i < inProgressVideos.length) {
-                              final video = inProgressVideos[i];
-                              final progress = progressMap[video.videoId] ?? 0.0;
+                          children: [
+                            // In-Progress Section
+                            Text('In-Progress', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.orange[800])),
+                            if (inProgressVideos.isEmpty)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                child: Text('No active downloads.', style: TextStyle(color: Colors.grey[600])),
+                              ),
+                            ...inProgressVideos.map((video) {
                               return Card(
                                 color: Colors.yellow[50],
                                 elevation: 2,
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                                 child: ListTile(
-                        leading: video.thumbnailUrl.isNotEmpty
-                            ? Image.network(video.thumbnailUrl, width: 56, height: 56, fit: BoxFit.cover)
-                            : Icon(Icons.music_note, size: 56),
+                                  leading: video.thumbnailUrl.isNotEmpty
+                                      ? Image.network(video.thumbnailUrl, width: 56, height: 56, fit: BoxFit.cover)
+                                      : Icon(Icons.music_note, size: 56),
                                   title: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
                                       Text(video.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontWeight: FontWeight.bold)),
                                       SizedBox(height: 4),
-                                      LinearProgressIndicator(
-                                        value: progress,
-                                        minHeight: 4,
-                                        backgroundColor: Colors.grey.shade300,
-                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+                                      ValueListenableBuilder<Map<String, double>>(
+                                        valueListenable: DownloadService.downloadProgressNotifier,
+                                        builder: (context, progressMap, _) {
+                                          final progress = progressMap[video.videoId] ?? 0.0;
+                                          return Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              LinearProgressIndicator(
+                                                value: progress > 0 ? progress : null, // null = indeterminate
+                                                minHeight: 4,
+                                                backgroundColor: Colors.grey.shade300,
+                                                valueColor: AlwaysStoppedAnimation<Color>(Colors.orange),
+                                              ),
+                                              SizedBox(height: 4),
+                                              Text(
+                                                progress > 0
+                                                  ? 'Downloading... ${(progress * 100).toStringAsFixed(0)}%'
+                                                  : 'Downloading...',
+                                                style: TextStyle(fontSize: 13, color: Colors.orange[800], fontWeight: FontWeight.w500),
+                                              ),
+                                            ],
+                                          );
+                                        },
                                       ),
-                                      SizedBox(height: 4),
-                                      Text('Downloading... ${(progress * 100).toStringAsFixed(0)}%', style: TextStyle(fontSize: 13, color: Colors.orange[800], fontWeight: FontWeight.w500)),
                                     ],
                                   ),
                                   subtitle: Text(video.channelName),
                                   trailing: IconButton(
                                     icon: Icon(Icons.close, color: Colors.red),
                                     tooltip: 'Cancel Download',
-                                  onPressed: () async {
+                                    onPressed: () async {
                                       await DownloadService.cancelDownload(video.videoId);
                                       await _loadDownloadedVideos();
                                     },
@@ -247,51 +236,56 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen> {
                                   contentPadding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
                                 ),
                               );
-                            } else {
-                              final video = completedList[i - inProgressVideos.length];
-                              return Card(
-                                elevation: 2,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                                child: _AudioProgressListTile(
-                                  video: video,
-                                  onDelete: () async {
-                                final confirm = await showDialog<bool>(
-                                  context: context,
-                                  builder: (context) => AlertDialog(
-                                    title: Text('Delete Audio'),
-                                    content: Text('Are you sure you want to delete this audio?'),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.of(context).pop(false),
-                                        child: Text('No'),
-                                      ),
-                                      TextButton(
-                                        onPressed: () => Navigator.of(context).pop(true),
-                                        child: Text('Yes'),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                                if (confirm == true) {
-                                  await DownloadService.deleteDownloadedAudio(video.videoId);
-                                  await _loadDownloadedVideos();
-                                      if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text('Deleted: ${video.title}')),
+                            }),
+                            SizedBox(height: 18),
+                            // Completed Section
+                            Text('Completed', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green[800])),
+                            if (completedList.isEmpty)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                child: Text('No completed downloads.', style: TextStyle(color: Colors.grey[600])),
+                              ),
+                            ...completedList.map((video) => Card(
+                              elevation: 2,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                              child: _AudioProgressListTile(
+                                video: video,
+                                onDelete: () async {
+                                  final confirm = await showDialog<bool>(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      title: Text('Delete Audio'),
+                                      content: Text('Are you sure you want to delete this audio?'),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(false),
+                                          child: Text('No'),
+                                        ),
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(true),
+                                          child: Text('Yes'),
+                                        ),
+                                      ],
+                                    ),
                                   );
-                                }
-                              },
-                            ),
-                              );
-                            }
-                  },
-                      );
-                    },
-              ),
+                                  if (confirm == true) {
+                                    await DownloadService.deleteDownloadedAudio(video.videoId);
+                                    await _loadDownloadedVideos();
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('Deleted: ${video.title}')),
+                                    );
+                                  }
+                                },
+                              ),
+                            )),
+                          ],
+                        );
+                      },
+                    ),
             ),
-          
-          MiniPlayer(),
-        ],
+            MiniPlayer(),
+          ],
         ),
       ),
       floatingActionButton: FloatingActionButton(
@@ -437,6 +431,7 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
                 onPressed: () async {
                   final file = File(video.filePath);
                   if (!await file.exists()) {
+                    if (!mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('Audio file not found: ${video.filePath}')),
                     );
@@ -466,6 +461,7 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
           onTap: () async {
             final file = File(video.filePath);
             if (!await file.exists()) {
+              if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Audio file not found: ${video.filePath}')),
               );
