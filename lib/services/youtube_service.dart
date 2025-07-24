@@ -6,7 +6,7 @@ import 'dart:convert';
 
 class YouTubeService {
   // YouTube Data API key - you'll need to get one from Google Cloud Console
-  static const String _apiKey = 'AIzaSyD6bLmh6HtpIn0EPuFbi6enfAhkIpc6aTo'; // Replace with your actual API key
+  static const String _apiKey = 'YOUR_YOUTUBE_API_KEY'; // Replace with your actual API key
   
   @pragma('vm:entry-point')
   static Future<List<Video>> fetchChannelVideos(String channelId) async {
