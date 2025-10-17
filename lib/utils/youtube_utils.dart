@@ -22,7 +22,8 @@ Future<String> parseChannelId(String urlOrId) async {
       return uri.pathSegments.last;
     }
     // Handle URL: /@handle
-    else if (uri.pathSegments.isNotEmpty && uri.pathSegments.first.startsWith('@')) {
+    else if (uri.pathSegments.isNotEmpty &&
+        uri.pathSegments.first.startsWith('@')) {
       // Only use the first path segment as the handle, ignore query and extra path
       final handle = uri.pathSegments.first;
       final channelId = await fetchChannelIdFromHandle(handle);
@@ -34,7 +35,9 @@ Future<String> parseChannelId(String urlOrId) async {
     }
     // User URL (not supported)
     else if (uri.pathSegments.contains('user')) {
-      throw Exception('User URLs not supported. Please use channel URLs or handles.');
+      throw Exception(
+        'User URLs not supported. Please use channel URLs or handles.',
+      );
     }
   }
   // Otherwise, assume it's already a channel ID
@@ -52,7 +55,7 @@ Future<String?> fetchChannelIdFromHandle(String handle) async {
     Uri.parse(url),
     headers: {
       'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     },
   );
 
@@ -83,8 +86,29 @@ Future<String> fetchChannelName(String channelId) async {
   if (response.statusCode == 200) {
     final document = xml.XmlDocument.parse(response.body);
     final titleElement = document.findAllElements('title').first;
-    return titleElement.text;
+    return titleElement.innerText;
   } else {
     throw Exception('Failed to fetch channel name');
   }
-} 
+}
+
+String formatSubscriberCount(int? count) {
+  if (count == null) return '';
+  if (count >= 1000000000) {
+    return _formatWithSuffix(count, 1000000000, 'B');
+  }
+  if (count >= 1000000) {
+    return _formatWithSuffix(count, 1000000, 'M');
+  }
+  if (count >= 1000) {
+    return _formatWithSuffix(count, 1000, 'K');
+  }
+  return count.toString();
+}
+
+String _formatWithSuffix(int count, int divisor, String suffix) {
+  final value = count / divisor;
+  final formatted = value.toStringAsFixed(2);
+  final trimmed = formatted.replaceFirst(RegExp(r'\.?0+$'), '');
+  return '$trimmed$suffix';
+}

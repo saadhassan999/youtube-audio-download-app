@@ -3,14 +3,20 @@ class Channel {
   final String name;
   final String description;
   final String thumbnailUrl;
+  final String? handle;
+  final int? subscriberCount;
+  final bool hiddenSubscriberCount;
   String lastVideoId;
 
   Channel({
-    required this.id, 
-    required this.name, 
+    required this.id,
+    required this.name,
     this.description = '',
     this.thumbnailUrl = '',
-    this.lastVideoId = ''
+    this.lastVideoId = '',
+    this.handle,
+    this.subscriberCount,
+    this.hiddenSubscriberCount = false,
   });
 
   Map<String, dynamic> toMap() => {
@@ -27,5 +33,8 @@ class Channel {
     description: map['description'] ?? '',
     thumbnailUrl: map['thumbnailUrl'] ?? '',
     lastVideoId: map['lastVideoId'] ?? '',
+    handle: map['handle'],
+    subscriberCount: map['subscriberCount'],
+    hiddenSubscriberCount: map['hiddenSubscriberCount'] ?? false,
   );
-} 
+}

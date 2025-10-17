@@ -3,6 +3,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import '../services/download_service.dart';
 import '../models/downloaded_video.dart';
 import 'dart:io';
+import '../core/snackbar_bus.dart';
 
 class AudioControls extends StatefulWidget {
   final DownloadedVideo? currentVideo;
@@ -43,12 +44,10 @@ class _AudioControlsState extends State<AudioControls> {
 
   void _playPause() async {
     if (widget.currentVideo == null) return;
-    
+
     final file = File(widget.currentVideo!.filePath);
     if (!await file.exists()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Audio file not found')),
-      );
+      showGlobalSnackBarMessage('Audio file not found');
       return;
     }
 
@@ -94,7 +93,7 @@ class _AudioControlsState extends State<AudioControls> {
     final hours = duration.inHours;
     final minutes = duration.inMinutes.remainder(60);
     final seconds = duration.inSeconds.remainder(60);
-    
+
     if (hours > 0) {
       return '$hours:${twoDigits(minutes)}:${twoDigits(seconds)}';
     } else {
@@ -139,26 +138,32 @@ class _AudioControlsState extends State<AudioControls> {
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
                   child: widget.currentVideo!.thumbnailUrl.isNotEmpty
-                    ? Image.network(
-                        widget.currentVideo!.thumbnailUrl,
-                        width: 60,
-                        height: 60,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            width: 60,
-                            height: 60,
-                            color: Colors.grey[300],
-                            child: Icon(Icons.music_note, color: Colors.grey[600]),
-                          );
-                        },
-                      )
-                    : Container(
-                        width: 60,
-                        height: 60,
-                        color: Colors.grey[300],
-                        child: Icon(Icons.music_note, color: Colors.grey[600]),
-                      ),
+                      ? Image.network(
+                          widget.currentVideo!.thumbnailUrl,
+                          width: 60,
+                          height: 60,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Container(
+                              width: 60,
+                              height: 60,
+                              color: Colors.grey[300],
+                              child: Icon(
+                                Icons.music_note,
+                                color: Colors.grey[600],
+                              ),
+                            );
+                          },
+                        )
+                      : Container(
+                          width: 60,
+                          height: 60,
+                          color: Colors.grey[300],
+                          child: Icon(
+                            Icons.music_note,
+                            color: Colors.grey[600],
+                          ),
+                        ),
                 ),
                 SizedBox(width: 12),
                 Expanded(
@@ -177,10 +182,7 @@ class _AudioControlsState extends State<AudioControls> {
                       SizedBox(height: 4),
                       Text(
                         widget.currentVideo!.channelName,
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 14,
-                        ),
+                        style: TextStyle(color: Colors.grey[600], fontSize: 14),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -197,15 +199,20 @@ class _AudioControlsState extends State<AudioControls> {
                     ),
                     child: Text(
                       '${_playbackSpeed.toStringAsFixed(1)}x',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   ),
-                  itemBuilder: (context) => [
-                    0.5, 0.75, 1.0, 1.25, 1.5, 2.0
-                  ].map((speed) => PopupMenuItem(
-                    value: speed,
-                    child: Text('${speed.toStringAsFixed(1)}x'),
-                  )).toList(),
+                  itemBuilder: (context) => [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                      .map(
+                        (speed) => PopupMenuItem(
+                          value: speed,
+                          child: Text('${speed.toStringAsFixed(1)}x'),
+                        ),
+                      )
+                      .toList(),
                   onSelected: _setPlaybackSpeed,
                 ),
               ],
@@ -222,9 +229,9 @@ class _AudioControlsState extends State<AudioControls> {
                 stream: DownloadService.globalAudioPlayer.positionStream,
                 builder: (context, positionSnapshot) {
                   final position = positionSnapshot.data ?? Duration.zero;
-                  final progress = duration.inSeconds > 0 
-                    ? position.inSeconds / duration.inSeconds 
-                    : 0.0;
+                  final progress = duration.inSeconds > 0
+                      ? position.inSeconds / duration.inSeconds
+                      : 0.0;
 
                   return Column(
                     children: [
@@ -233,7 +240,9 @@ class _AudioControlsState extends State<AudioControls> {
                           activeTrackColor: Theme.of(context).primaryColor,
                           inactiveTrackColor: Colors.grey[300],
                           thumbColor: Theme.of(context).primaryColor,
-                          thumbShape: RoundSliderThumbShape(enabledThumbRadius: 6),
+                          thumbShape: RoundSliderThumbShape(
+                            enabledThumbRadius: 6,
+                          ),
                           trackHeight: 4,
                         ),
                         child: Slider(
@@ -292,14 +301,15 @@ class _AudioControlsState extends State<AudioControls> {
                 icon: Icon(Icons.skip_previous, size: 32),
                 color: widget.currentIndex > 0 ? null : Colors.grey[400],
               ),
-              
+
               // Play/Pause button
               ValueListenableBuilder<PlayingAudio?>(
                 valueListenable: DownloadService.globalPlayingNotifier,
                 builder: (context, playing, _) {
                   final isPlaying = playing?.isPlaying ?? false;
-                  final isCurrentTrack = playing?.videoId == widget.currentVideo?.videoId;
-                  
+                  final isCurrentTrack =
+                      playing?.videoId == widget.currentVideo?.videoId;
+
                   return Container(
                     decoration: BoxDecoration(
                       color: Theme.of(context).primaryColor,
@@ -308,7 +318,9 @@ class _AudioControlsState extends State<AudioControls> {
                     child: IconButton(
                       onPressed: _playPause,
                       icon: Icon(
-                        (isPlaying && isCurrentTrack) ? Icons.pause : Icons.play_arrow,
+                        (isPlaying && isCurrentTrack)
+                            ? Icons.pause
+                            : Icons.play_arrow,
                         size: 32,
                         color: Colors.white,
                       ),
@@ -316,12 +328,16 @@ class _AudioControlsState extends State<AudioControls> {
                   );
                 },
               ),
-              
+
               // Next button
               IconButton(
-                onPressed: widget.currentIndex < widget.playlist.length - 1 ? _skipToNext : null,
+                onPressed: widget.currentIndex < widget.playlist.length - 1
+                    ? _skipToNext
+                    : null,
                 icon: Icon(Icons.skip_next, size: 32),
-                color: widget.currentIndex < widget.playlist.length - 1 ? null : Colors.grey[400],
+                color: widget.currentIndex < widget.playlist.length - 1
+                    ? null
+                    : Colors.grey[400],
               ),
             ],
           ),
@@ -345,10 +361,10 @@ class _AudioControlsState extends State<AudioControls> {
               ),
             ),
           ],
-          
+
           SizedBox(height: 16),
         ],
       ),
     );
   }
-} 
+}

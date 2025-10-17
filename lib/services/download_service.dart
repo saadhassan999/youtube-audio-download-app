@@ -1,14 +1,19 @@
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
+import 'package:http/io_client.dart';
 import 'dart:io';
 import '../models/downloaded_video.dart';
 import 'database_service.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'notification_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'extractor_service.dart';
+import 'yt_dlp_native_extractor.dart';
+import 'youtube_explode_extractor.dart';
+import 'composite_extractor.dart';
 
 // Helper class to hold playing state
 class PlayingAudio {
@@ -22,12 +27,111 @@ class DownloadService {
   static late final AudioPlayer globalAudioPlayer;
   static bool _audioPlayerInitialized = false;
   // Global notifier for currently playing videoId and playing state
-  static final ValueNotifier<PlayingAudio?> globalPlayingNotifier = ValueNotifier<PlayingAudio?>(null);
-  static final ValueNotifier<int> downloadedVideosChanged = ValueNotifier<int>(0);
-  static final ValueNotifier<Map<String, double>> downloadProgressNotifier = ValueNotifier({});
-  static final ValueNotifier<bool> isAnyDownloadInProgress = ValueNotifier<bool>(false);
+  static final ValueNotifier<PlayingAudio?> globalPlayingNotifier =
+      ValueNotifier<PlayingAudio?>(null);
+  static final ValueNotifier<int> downloadedVideosChanged = ValueNotifier<int>(
+    0,
+  );
+  static final ValueNotifier<Map<String, double>> downloadProgressNotifier =
+      ValueNotifier({});
+  static final ValueNotifier<bool> isAnyDownloadInProgress =
+      ValueNotifier<bool>(false);
   static final Map<String, bool> _downloadCancelFlags = {};
   static final Set<String> _activeDownloads = {};
+  static final Set<String> _recentlyCancelledDownloads = {};
+  static const int _maxDownloadRetries = 3;
+  static const String _downloadUserAgent =
+      'Mozilla/5.0 (Linux; Android 13; en-us) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+  static const Map<String, String> _downloadRequestHeaders = {
+    'Connection': 'keep-alive',
+    'Accept': '*/*',
+  };
+  static final ExtractorService _extractor = CompositeExtractor(
+    NativeYtDlpExtractor(),
+    YoutubeExplodeExtractor(),
+  );
+  static const MethodChannel _foregroundChannel =
+      MethodChannel('download_foreground_service');
+  static bool _isForegroundServiceActive = false;
+
+  static int? _parseTotalFromContentRange(String? contentRange) {
+    if (contentRange == null || contentRange.isEmpty) return null;
+    final match = RegExp(r'bytes\s+\d+-\d+/(\d+|\*)', caseSensitive: false)
+        .firstMatch(contentRange);
+    if (match == null) return null;
+    final totalPart = match.group(1);
+    if (totalPart == null || totalPart == '*') return null;
+    return int.tryParse(totalPart);
+  }
+
+  static void _updateProgressState(
+    String videoId,
+    int receivedBytes,
+    int totalBytes,
+  ) {
+    if (totalBytes <= 0) return;
+    final progressValue =
+        (receivedBytes / totalBytes).clamp(0.0, 1.0).toDouble();
+    final previous = downloadProgressNotifier.value[videoId] ?? 0.0;
+    if ((progressValue - previous).abs() >= 0.01 || progressValue >= 0.999) {
+      downloadProgressNotifier.value = {
+        ...downloadProgressNotifier.value,
+        videoId: progressValue,
+      };
+    }
+  }
+
+  static Future<int?> _getRemoteContentLength(String url) async {
+    try {
+      final response = await http.head(
+        Uri.parse(url),
+        headers: {
+          ..._downloadRequestHeaders,
+          'User-Agent': _downloadUserAgent,
+        },
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+      final headerValue = response.headers['content-length'];
+      final directLength = headerValue != null ? int.tryParse(headerValue) : 0;
+      if (directLength != null && directLength > 0) {
+        return directLength;
+      }
+      return _parseTotalFromContentRange(response.headers['content-range']);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> _ensureForegroundServiceActive() async {
+    if (!Platform.isAndroid) return;
+    if (_isForegroundServiceActive) return;
+    try {
+      await _foregroundChannel.invokeMethod('start');
+      _isForegroundServiceActive = true;
+    } catch (e) {
+      debugPrint('Failed to start foreground service: $e');
+    }
+  }
+
+  static Future<void> _stopForegroundServiceIfIdle() async {
+    if (!Platform.isAndroid) return;
+    if (_activeDownloads.isNotEmpty) return;
+    if (!_isForegroundServiceActive) return;
+    try {
+      await _foregroundChannel.invokeMethod('stop');
+    } catch (e) {
+      debugPrint('Failed to stop foreground service: $e');
+    } finally {
+      _isForegroundServiceActive = false;
+    }
+  }
+
+  static Future<void> _handleDownloadRemoved(String videoId) async {
+    _activeDownloads.remove(videoId);
+    await _stopForegroundServiceIfIdle();
+  }
 
   static Future<void> init() async {
     if (!_audioPlayerInitialized) {
@@ -49,7 +153,8 @@ class DownloadService {
     _initialized = true;
     globalAudioPlayer.playerStateStream.listen((state) {
       final current = globalPlayingNotifier.value;
-      if (state.processingState == ProcessingState.completed || state.processingState == ProcessingState.idle) {
+      if (state.processingState == ProcessingState.completed ||
+          state.processingState == ProcessingState.idle) {
         globalPlayingNotifier.value = null;
       } else if (state.playing) {
         if (current != null) {
@@ -80,13 +185,14 @@ class DownloadService {
   static Future<bool> isVideoDownloaded(String videoId) async {
     final video = await DatabaseService.instance.getDownloadedVideo(videoId);
     if (video == null) return false;
+    if (video.status != 'completed') return false;
     return File(video.filePath).existsSync();
   }
 
   @pragma('vm:entry-point')
   static Future<String?> getDownloadedFilePath(String videoId) async {
     final video = await DatabaseService.instance.getDownloadedVideo(videoId);
-    if (video == null) return null;
+    if (video == null || video.status != 'completed') return null;
     return File(video.filePath).existsSync() ? video.filePath : null;
   }
 
@@ -105,6 +211,7 @@ class DownloadService {
       return null;
     }
     _activeDownloads.add(videoId);
+    await _ensureForegroundServiceActive();
     final dir = await getApplicationDocumentsDirectory();
     final filePath = '${dir.path}/$videoId.mp3';
     final file = File(filePath);
@@ -114,6 +221,7 @@ class DownloadService {
       await oldM4a.delete();
     }
     _downloadCancelFlags[videoId] = false;
+    _recentlyCancelledDownloads.remove(videoId);
     // Only insert a 'downloading' record if not resuming
     if (!resume) {
       final downloadingVideo = DownloadedVideo(
@@ -131,72 +239,207 @@ class DownloadService {
       downloadedVideosChanged.value++;
       isAnyDownloadInProgress.value = true;
     }
-    final yt = YoutubeExplode();
+    http.Client? client;
+    HttpClient? ioHttpClient;
     try {
-      // Get video manifest (API updated for v2.x)
-      final manifest = await yt.videos.streams.getManifest(videoId);
-      final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
-      if (audioStreamInfo == null) {
-        print('No audio stream found for video: $videoId');
-        // Mark as failed instead of deleting
-        final failedVideo = DownloadedVideo(
-          videoId: videoId,
-          title: title,
-          filePath: filePath,
-          size: 0,
-          duration: null,
-          channelName: channelName,
-          thumbnailUrl: thumbnailUrl,
-          downloadedAt: DateTime.now(),
-          status: 'failed',
-        );
-        await DatabaseService.instance.addDownloadedVideo(failedVideo);
-        downloadedVideosChanged.value++;
-        _activeDownloads.remove(videoId);
-        return null;
-      }
-      // Download audio stream (API updated for v2.x)
-      final stream = yt.videos.streams.get(audioStreamInfo);
-      final output = file.openWrite();
-      int received = 0;
-      final total = audioStreamInfo.size.totalBytes;
-      await for (final data in stream) {
-        if (_downloadCancelFlags[videoId] == true) {
-          print('Download for $videoId cancelled by user.');
-          await output.close();
-          await file.delete().catchError((_) {});
-          yt.close();
-          // Remove the 'downloading' record
-          await DatabaseService.instance.deleteDownloadedVideo(videoId);
-          downloadedVideosChanged.value++;
-          await _updateIsAnyDownloadInProgress();
-          final newMap = Map<String, double>.from(downloadProgressNotifier.value);
-          newMap.remove(videoId);
-          downloadProgressNotifier.value = newMap;
-          _downloadCancelFlags.remove(videoId);
-          _activeDownloads.remove(videoId);
-          return null;
-        }
-        output.add(data);
-        received += data.length;
-        if (onProgress != null) {
-          onProgress(received, total);
-        }
-        // Update in-memory progress
-        downloadProgressNotifier.value = {
-          ...downloadProgressNotifier.value,
-          videoId: total > 0 ? received / total : 0.0,
-        };
-      }
-      await output.close();
-      yt.close();
+      final sourceIdOrUrl = videoUrl.isNotEmpty
+          ? videoUrl
+          : 'https://www.youtube.com/watch?v=$videoId';
+      final extracted = await _extractor.getBestAudio(sourceIdOrUrl);
+      int fileSize = 0;
+      int attempt = 0;
+      bool shouldAttemptResume = resume;
+      int? knownRemoteLength;
+      while (attempt < _maxDownloadRetries) {
+        IOSink? output;
+        try {
+          final fileExists = await file.exists();
+          final existingLength = fileExists ? await file.length() : 0;
+          if (!shouldAttemptResume && existingLength > 0) {
+            shouldAttemptResume = true;
+          }
+          final bool resumeThisAttempt =
+              shouldAttemptResume && existingLength > 0;
 
-      // Validate file after download
+          if (resumeThisAttempt && knownRemoteLength == null) {
+            knownRemoteLength = await _getRemoteContentLength(extracted.url);
+            if (knownRemoteLength != null &&
+                existingLength >= knownRemoteLength) {
+              fileSize = existingLength;
+              break;
+            }
+            if (knownRemoteLength != null) {
+              onProgress?.call(existingLength, knownRemoteLength);
+              _updateProgressState(videoId, existingLength, knownRemoteLength);
+            }
+          }
+
+          if (!resumeThisAttempt && fileExists) {
+            await file.delete();
+          }
+          ioHttpClient = HttpClient()
+            ..userAgent = _downloadUserAgent
+            ..connectionTimeout = const Duration(seconds: 20)
+            ..autoUncompress = false
+            ..maxConnectionsPerHost = 8;
+          client = IOClient(ioHttpClient);
+          final request = http.Request('GET', Uri.parse(extracted.url));
+          final requestHeaders = Map<String, String>.from(
+            _downloadRequestHeaders,
+          );
+          if (resumeThisAttempt && existingLength > 0) {
+            requestHeaders['Range'] = 'bytes=$existingLength-';
+          }
+          request.headers.addAll(requestHeaders);
+          final response = await client.send(request);
+
+          if (resumeThisAttempt && response.statusCode == 416) {
+            knownRemoteLength ??=
+                _parseTotalFromContentRange(response.headers['content-range']);
+            final currentSize = await file.length();
+            if (knownRemoteLength != null &&
+                currentSize >= knownRemoteLength) {
+              fileSize = currentSize;
+              break;
+            }
+            shouldAttemptResume = false;
+            if (fileExists) {
+              await file.delete();
+            }
+            throw Exception(
+              'Resume rejected with status 416 for $videoId',
+            );
+          }
+
+          if (resumeThisAttempt &&
+              response.statusCode == 200 &&
+              existingLength > 0) {
+            shouldAttemptResume = false;
+            await response.stream.drain();
+            if (await file.exists()) {
+              await file.delete();
+            }
+            continue;
+          }
+
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            throw Exception(
+              'Audio download failed with status ${response.statusCode}',
+            );
+          }
+
+          knownRemoteLength ??=
+              _parseTotalFromContentRange(response.headers['content-range']);
+          if (knownRemoteLength == null) {
+            final responseLength = response.contentLength ?? 0;
+            if (responseLength > 0) {
+              if (resumeThisAttempt && response.statusCode == 206) {
+                knownRemoteLength = existingLength + responseLength;
+              } else {
+                knownRemoteLength = responseLength;
+              }
+            }
+          }
+          if (resumeThisAttempt && knownRemoteLength != null) {
+            _updateProgressState(videoId, existingLength, knownRemoteLength);
+          }
+
+          output = file.openWrite(
+            mode: resumeThisAttempt ? FileMode.append : FileMode.write,
+          );
+          int received = resumeThisAttempt ? existingLength : 0;
+          final totalForCallbacks = knownRemoteLength ?? 0;
+          if (onProgress != null) {
+            onProgress(received, totalForCallbacks);
+          }
+
+          await for (final data in response.stream) {
+            if (_downloadCancelFlags[videoId] == true) {
+              print('Download for $videoId cancelled by user.');
+              await output.close();
+              try {
+                await file.delete();
+              } catch (_) {}
+              _recentlyCancelledDownloads.add(videoId);
+              await DatabaseService.instance.deleteDownloadedVideo(videoId);
+              downloadedVideosChanged.value++;
+              await _updateIsAnyDownloadInProgress();
+              final newMap = Map<String, double>.from(
+                downloadProgressNotifier.value,
+              );
+              newMap.remove(videoId);
+              downloadProgressNotifier.value = newMap;
+              _downloadCancelFlags.remove(videoId);
+              await _handleDownloadRemoved(videoId);
+              return null;
+            }
+            output.add(data);
+            received += data.length;
+            if (onProgress != null) {
+              onProgress(received, totalForCallbacks);
+            }
+            if (knownRemoteLength != null) {
+              _updateProgressState(videoId, received, knownRemoteLength);
+            }
+          }
+
+          await output.close();
+          fileSize = await file.length();
+          if (knownRemoteLength != null) {
+            final expectedSize = knownRemoteLength;
+            if (fileSize < expectedSize && (expectedSize - fileSize) > 5) {
+              throw Exception(
+                'Downloaded size $fileSize is less than expected $expectedSize',
+              );
+            }
+          }
+          if (fileSize == 0) {
+            throw Exception('Downloaded file is empty');
+          }
+          break;
+        } catch (e) {
+          print('Download attempt ${attempt + 1} for $videoId failed: $e');
+          await output?.close();
+          if (_downloadCancelFlags[videoId] == true) {
+            _recentlyCancelledDownloads.add(videoId);
+            await DatabaseService.instance.deleteDownloadedVideo(videoId);
+            downloadedVideosChanged.value++;
+            await _updateIsAnyDownloadInProgress();
+            final newMap = Map<String, double>.from(
+              downloadProgressNotifier.value,
+            );
+            newMap.remove(videoId);
+            downloadProgressNotifier.value = newMap;
+            _downloadCancelFlags.remove(videoId);
+            await _handleDownloadRemoved(videoId);
+            return null;
+          }
+          if (await file.exists()) {
+            final partialSize = await file.length();
+            if (partialSize > 0) {
+              shouldAttemptResume = true;
+              final total = knownRemoteLength;
+              if (total != null) {
+                _updateProgressState(videoId, partialSize, total);
+              }
+            }
+          }
+          if (++attempt >= _maxDownloadRetries) {
+            rethrow;
+          }
+          await Future.delayed(Duration(seconds: 2 * attempt));
+        } finally {
+          client?.close();
+          ioHttpClient?.close(force: true);
+          client = null;
+          ioHttpClient = null;
+        }
+      }
+
       final exists = await file.exists();
-      final fileSize = exists ? await file.length() : 0;
       print('Downloaded file path: $filePath');
       print('Downloaded file exists: $exists');
-      print('Downloaded file size: $fileSize bytes');
+      print('Downloaded file size: ${exists ? fileSize : 0} bytes');
       if (!exists || fileSize == 0) {
         print('Download failed or file is empty. Not adding to database.');
         // Mark as failed instead of deleting
@@ -213,7 +456,7 @@ class DownloadService {
         );
         await DatabaseService.instance.addDownloadedVideo(failedVideo);
         downloadedVideosChanged.value++;
-        _activeDownloads.remove(videoId);
+        await _handleDownloadRemoved(videoId);
         return null;
       }
 
@@ -240,13 +483,31 @@ class DownloadService {
       newMap.remove(videoId);
       downloadProgressNotifier.value = newMap;
       _downloadCancelFlags.remove(videoId);
-      _activeDownloads.remove(videoId);
+      await _handleDownloadRemoved(videoId);
       return completedVideo;
     } catch (e) {
       print('Audio download error: $e');
-      yt.close();
-      if (await file.exists()) {
-        await file.delete();
+      final wasCancelled =
+          _downloadCancelFlags[videoId] == true ||
+          _recentlyCancelledDownloads.contains(videoId);
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (_) {}
+      if (wasCancelled) {
+        _recentlyCancelledDownloads.remove(videoId);
+        _downloadCancelFlags.remove(videoId);
+        final newMap = Map<String, double>.from(
+          downloadProgressNotifier.value,
+        );
+        newMap.remove(videoId);
+        downloadProgressNotifier.value = newMap;
+        await _handleDownloadRemoved(videoId);
+        await _updateIsAnyDownloadInProgress();
+        client?.close();
+        ioHttpClient?.close(force: true);
+        return null;
       }
       // Mark as failed instead of deleting
       final failedVideo = DownloadedVideo(
@@ -267,18 +528,12 @@ class DownloadService {
       newMap.remove(videoId);
       downloadProgressNotifier.value = newMap;
       _downloadCancelFlags.remove(videoId);
-      _activeDownloads.remove(videoId);
+      _recentlyCancelledDownloads.remove(videoId);
+      await _handleDownloadRemoved(videoId);
+      client?.close();
+      ioHttpClient?.close(force: true);
       return null;
     }
-  }
-
-  // Old method kept for compatibility if needed
-  static Future<String> _downloadAudio(String audioUrl, String fileName) async {
-    final response = await http.get(Uri.parse(audioUrl));
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/$fileName.mp3');
-    await file.writeAsBytes(response.bodyBytes);
-    return file.path;
   }
 
   static Future<void> deleteDownloadedAudio(String videoId) async {
@@ -293,12 +548,17 @@ class DownloadService {
         await file.delete();
       }
       final dbClient = await DatabaseService.instance.db;
-      await dbClient.delete('downloaded_videos', where: 'videoId = ?', whereArgs: [videoId]);
+      await dbClient.delete(
+        'downloaded_videos',
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
     }
   }
 
   static Future<void> cancelDownload(String videoId) async {
     _downloadCancelFlags[videoId] = true;
+    _recentlyCancelledDownloads.add(videoId);
     // Remove the in-progress record from the DB
     await DatabaseService.instance.deleteDownloadedVideo(videoId);
     downloadedVideosChanged.value++;
@@ -311,6 +571,10 @@ class DownloadService {
     // (You can add file deletion logic here if needed)
   }
 
+  static bool consumeCancelledFlag(String videoId) {
+    return _recentlyCancelledDownloads.remove(videoId);
+  }
+
   // Call this on app startup
   static Future<void> restoreGlobalPlayerState() async {
     final prefs = await SharedPreferences.getInstance();
@@ -318,7 +582,9 @@ class DownloadService {
     final lastPosition = prefs.getInt(_lastVideoPositionKey);
     final lastState = prefs.getString(_lastVideoStateKey);
     if (lastVideoId != null) {
-      final video = await DatabaseService.instance.getDownloadedVideo(lastVideoId);
+      final video = await DatabaseService.instance.getDownloadedVideo(
+        lastVideoId,
+      );
       if (video != null && File(video.filePath).existsSync()) {
         await globalAudioPlayer.setAudioSource(
           ConcatenatingAudioSource(
@@ -330,15 +596,22 @@ class DownloadService {
                   album: 'YouTube Audio',
                   title: video.title,
                   artist: video.channelName,
-                  artUri: video.thumbnailUrl.isNotEmpty ? Uri.parse(video.thumbnailUrl) : null,
+                  artUri: video.thumbnailUrl.isNotEmpty
+                      ? Uri.parse(video.thumbnailUrl)
+                      : null,
                 ),
               ),
             ],
           ),
           initialIndex: 0,
-          initialPosition: lastPosition != null && lastPosition > 0 ? Duration(milliseconds: lastPosition) : Duration.zero,
+          initialPosition: lastPosition != null && lastPosition > 0
+              ? Duration(milliseconds: lastPosition)
+              : Duration.zero,
         );
-        globalPlayingNotifier.value = PlayingAudio(video.videoId, lastState == 'playing');
+        globalPlayingNotifier.value = PlayingAudio(
+          video.videoId,
+          lastState == 'playing',
+        );
         if (lastState == 'playing') {
           await globalAudioPlayer.play();
         }
@@ -352,12 +625,24 @@ class DownloadService {
     final current = globalPlayingNotifier.value;
     if (current != null) {
       await prefs.setString(_lastVideoIdKey, current.videoId);
-      await prefs.setInt(_lastVideoPositionKey, globalAudioPlayer.position.inMilliseconds);
-      await prefs.setString(_lastVideoStateKey, globalAudioPlayer.playing ? 'playing' : 'paused');
+      await prefs.setInt(
+        _lastVideoPositionKey,
+        globalAudioPlayer.position.inMilliseconds,
+      );
+      await prefs.setString(
+        _lastVideoStateKey,
+        globalAudioPlayer.playing ? 'playing' : 'paused',
+      );
     }
   }
 
-  static Future<void> playOrPause(String videoId, String filePath, {String? title, String? channelName, String? thumbnailUrl}) async {
+  static Future<void> playOrPause(
+    String videoId,
+    String filePath, {
+    String? title,
+    String? channelName,
+    String? thumbnailUrl,
+  }) async {
     ensureInitialized();
     final currentSource = globalAudioPlayer.audioSource;
     bool hasMediaItem = false;
@@ -365,7 +650,8 @@ class DownloadService {
         currentSource.length == 1 &&
         currentSource.children.first is UriAudioSource &&
         (currentSource.children.first as UriAudioSource).tag is MediaItem) {
-      final tag = (currentSource.children.first as UriAudioSource).tag as MediaItem;
+      final tag =
+          (currentSource.children.first as UriAudioSource).tag as MediaItem;
       hasMediaItem = tag.id == videoId;
     }
     if (!hasMediaItem) {
@@ -379,7 +665,9 @@ class DownloadService {
                 album: 'YouTube Audio',
                 title: title ?? 'Audio',
                 artist: channelName ?? '',
-                artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty ? Uri.parse(thumbnailUrl) : null,
+                artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
+                    ? Uri.parse(thumbnailUrl)
+                    : null,
               ),
             ),
           ],
@@ -387,15 +675,23 @@ class DownloadService {
         initialIndex: 0,
         initialPosition: Duration.zero,
       );
-      globalPlayingNotifier.value = PlayingAudio(videoId, false); // Set immediately after source
+      globalPlayingNotifier.value = PlayingAudio(
+        videoId,
+        false,
+      ); // Set immediately after source
     }
-    if (globalPlayingNotifier.value?.videoId == videoId && (globalPlayingNotifier.value?.isPlaying ?? false)) {
+    if (globalPlayingNotifier.value?.videoId == videoId &&
+        (globalPlayingNotifier.value?.isPlaying ?? false)) {
       await globalAudioPlayer.pause();
       globalPlayingNotifier.value = PlayingAudio(videoId, false);
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('audio_position_$videoId', globalAudioPlayer.position.inMilliseconds);
+      await prefs.setInt(
+        'audio_position_$videoId',
+        globalAudioPlayer.position.inMilliseconds,
+      );
       await saveGlobalPlayerState();
-    } else if (globalPlayingNotifier.value?.videoId == videoId && !(globalPlayingNotifier.value?.isPlaying ?? false)) {
+    } else if (globalPlayingNotifier.value?.videoId == videoId &&
+        !(globalPlayingNotifier.value?.isPlaying ?? false)) {
       globalPlayingNotifier.value = PlayingAudio(videoId, true);
       await globalAudioPlayer.play();
       await saveGlobalPlayerState();
@@ -417,6 +713,9 @@ class DownloadService {
     final inProgress = (await DatabaseService.instance.getDownloadedVideos())
         .where((v) => v.status == 'downloading')
         .toList();
+    if (inProgress.isNotEmpty) {
+      await _ensureForegroundServiceActive();
+    }
     for (final video in inProgress) {
       if (_activeDownloads.contains(video.videoId)) {
         // Reattach progress notifier by reading file size and total size
@@ -424,22 +723,22 @@ class DownloadService {
           final dir = await getApplicationDocumentsDirectory();
           final filePath = '${dir.path}/${video.videoId}.mp3';
           final file = File(filePath);
-          int received = await file.exists() ? await file.length() : 0;
-          // Get total size from YouTube
-          final yt = YoutubeExplode();
-          final manifest = await yt.videos.streams.getManifest(video.videoId);
-          final audioStreamInfo = manifest.audioOnly.withHighestBitrate();
-          final total = audioStreamInfo?.size.totalBytes ?? 0;
-          yt.close();
-          if (total > 0) {
-            final progress = received / total;
+          final received = await file.exists() ? await file.length() : 0;
+
+          final extracted = await _extractor.getBestAudio(
+            'https://www.youtube.com/watch?v=${video.videoId}',
+          );
+          final total = await _getRemoteContentLength(extracted.url);
+
+          if (total != null && total > 0) {
+            _updateProgressState(video.videoId, received, total);
+          } else {
             downloadProgressNotifier.value = {
               ...downloadProgressNotifier.value,
-              video.videoId: progress > 1.0 ? 1.0 : progress,
+              video.videoId: 0.0,
             };
           }
         } catch (e) {
-          // If we can't get progress, set to 0.0
           downloadProgressNotifier.value = {
             ...downloadProgressNotifier.value,
             video.videoId: 0.0,
@@ -460,4 +759,4 @@ class DownloadService {
       }
     }
   }
-} 
+}

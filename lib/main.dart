@@ -9,6 +9,7 @@ import 'services/download_service.dart';
 import 'package:workmanager/workmanager.dart';
 import 'dart:io';
 import 'services/notification_service.dart';
+import 'core/snackbar_bus.dart';
 import 'models/video.dart';
 import 'models/channel.dart';
 import 'dart:async';
@@ -25,18 +26,20 @@ Future<void> _requestNotificationPermission() async {
     if (Platform.isAndroid) {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
       print('Android SDK version: ${androidInfo.version.sdkInt}');
-      
+
       if (androidInfo.version.sdkInt >= 33) {
         print('Android 13+ detected, requesting notification permission...');
         final status = await Permission.notification.status;
         print('Current notification permission status: $status');
-        
+
         if (await Permission.notification.isDenied) {
           print('Notification permission denied, requesting...');
           final result = await Permission.notification.request();
           print('Notification permission request result: $result');
         } else {
-          print('Notification permission already granted or permanently denied');
+          print(
+            'Notification permission already granted or permanently denied',
+          );
         }
       } else {
         print('Android version < 13, notification permission not required');
@@ -62,10 +65,16 @@ void callbackDispatcher() {
 Future<void> backgroundTask() async {
   final prefs = await SharedPreferences.getInstance();
   // Check if we should skip the first background run (e.g., after manual download or first install)
-  final skipFirstBackgroundRun = prefs.getBool('skip_first_background_run') ?? false;
+  final skipFirstBackgroundRun =
+      prefs.getBool('skip_first_background_run') ?? false;
   if (skipFirstBackgroundRun) {
-    print('Background task: Skipping first run after manual download or install.');
-    await prefs.setBool('skip_first_background_run', false); // Reset for next run
+    print(
+      'Background task: Skipping first run after manual download or install.',
+    );
+    await prefs.setBool(
+      'skip_first_background_run',
+      false,
+    ); // Reset for next run
     return;
   }
   final channels = await DatabaseService.instance.getChannels();
@@ -80,18 +89,22 @@ Future<void> backgroundTask() async {
       // Find the index of the last processed video
       int lastIndex = videos.indexWhere((v) => v.id == channel.lastVideoId);
       List<Video> newVideos;
-      
+
       if (lastIndex == -1) {
         // lastVideoId not found (first run or channel changed), but if lastVideoId is set, skip background download
         if (channel.lastVideoId.isNotEmpty) {
-          print('Background task: ${channel.name} - lastVideoId set but not found, skipping background download.');
+          print(
+            'Background task: ${channel.name} - lastVideoId set but not found, skipping background download.',
+          );
           continue;
         }
         // If lastVideoId is empty, process top 3 (first install, legacy case)
         newVideos = videos.take(3).toList();
       } else if (lastIndex == 0) {
         // lastVideoId is already the newest video - no new videos to download
-        print('Background task: ${channel.name} - No new videos (latest already downloaded)');
+        print(
+          'Background task: ${channel.name} - No new videos (latest already downloaded)',
+        );
         continue;
       } else if (lastIndex > 0) {
         // There are newer videos than the lastVideoId
@@ -100,20 +113,22 @@ Future<void> backgroundTask() async {
         // No new videos
         newVideos = [];
       }
-      
+
       if (newVideos.isEmpty) {
         print('Background task: ${channel.name} - No new videos to download');
         continue;
       }
 
-      print('Background task: ${channel.name} - Found ${newVideos.length} new videos to download');
+      print(
+        'Background task: ${channel.name} - Found ${newVideos.length} new videos to download',
+      );
 
       // Process new videos (limit to first 5 to avoid overwhelming the system)
       // Download in chronological order (oldest first)
       newVideos = newVideos.reversed.toList();
       int processedCount = 0;
       String? lastDownloadedId;
-      
+
       for (final video in newVideos.take(3)) {
         final isDownloaded = await DownloadService.isVideoDownloaded(video.id);
         if (!isDownloaded) {
@@ -134,7 +149,9 @@ Future<void> backgroundTask() async {
             );
           } else {
             // Stop processing further videos if a download fails
-            print('Background task: Download failed for ${video.title}, stopping');
+            print(
+              'Background task: Download failed for ${video.title}, stopping',
+            );
             break;
           }
         } else {
@@ -154,16 +171,21 @@ Future<void> backgroundTask() async {
           lastVideoId: lastDownloadedId,
         );
         await DatabaseService.instance.updateChannel(updatedChannel);
-        print('Background task: Updated lastVideoId to $lastDownloadedId for ${channel.name}');
+        print(
+          'Background task: Updated lastVideoId to $lastDownloadedId for ${channel.name}',
+        );
       }
 
       // Show summary notification if any videos were downloaded
       if (processedCount > 0) {
         await NotificationService.showNotification(
           title: 'Background Download Complete',
-          body: 'Downloaded $processedCount new audio files from ${channel.name}',
+          body:
+              'Downloaded $processedCount new audio files from ${channel.name}',
         );
-        print('Background task: Completed downloading $processedCount videos from ${channel.name}');
+        print(
+          'Background task: Completed downloading $processedCount videos from ${channel.name}',
+        );
       } else {
         print('Background task: No new videos downloaded from ${channel.name}');
       }
@@ -178,15 +200,16 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _requestNotificationPermission();
   print('Notification permission requested');
-  
+
   print('Initializing JustAudioBackground...');
   await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.example.youtube_audio_downloader.channel.audio',
+    androidNotificationChannelId:
+        'com.example.youtube_audio_downloader.channel.audio',
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
   );
   print('JustAudioBackground initialized successfully');
-  
+
   // Test notification permission
   if (Platform.isAndroid) {
     final androidInfo = await DeviceInfoPlugin().androidInfo;
@@ -198,24 +221,19 @@ void main() async {
       }
     }
   }
-  
+
   await DownloadService.init();
   await DownloadService.resumeIncompleteDownloads();
   await DatabaseService.instance.db;
   await NotificationService.init();
   if (Platform.isAndroid) {
-    await Workmanager().initialize(
-      callbackDispatcher,
-      isInDebugMode: false,
-    );
+    await Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
     await Workmanager().registerPeriodicTask(
       'fetch_new_videos_task',
       fetchTask,
       frequency: const Duration(hours: 15),
       initialDelay: const Duration(minutes: 1),
-      constraints: Constraints(
-        networkType: NetworkType.connected,
-      ),
+      constraints: Constraints(networkType: NetworkType.connected),
       backoffPolicy: BackoffPolicy.exponential,
       backoffPolicyDelay: const Duration(minutes: 10),
     );
@@ -230,6 +248,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'YT AudioBox',
       theme: ThemeData(primarySwatch: Colors.red),
+      scaffoldMessengerKey: scaffoldMessengerKey,
       home: ChannelManagementScreen(),
       routes: {
         '/home': (_) => ChannelManagementScreen(),
@@ -240,4 +259,4 @@ class MyApp extends StatelessWidget {
       navigatorObservers: [routeObserver],
     );
   }
-} 
+}

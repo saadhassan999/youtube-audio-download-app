@@ -4,6 +4,7 @@ import '../services/database_service.dart';
 import '../models/downloaded_video.dart';
 import 'audio_player_bottom_sheet.dart';
 import 'dart:io';
+import '../core/snackbar_bus.dart';
 
 class MiniPlayer extends StatefulWidget {
   @override
@@ -18,7 +19,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
   void initState() {
     super.initState();
     _updatePlayerState();
-    
+
     // Listen to player state changes
     DownloadService.globalPlayingNotifier.addListener(_updatePlayerState);
   }
@@ -33,7 +34,9 @@ class _MiniPlayerState extends State<MiniPlayer> {
     final playing = DownloadService.globalPlayingNotifier.value;
     if (playing != null && playing.isPlaying) {
       // Get the current video info
-      final video = await DatabaseService.instance.getDownloadedVideo(playing.videoId);
+      final video = await DatabaseService.instance.getDownloadedVideo(
+        playing.videoId,
+      );
       setState(() {
         _currentVideo = video;
         _isPlaying = playing.isPlaying;
@@ -47,12 +50,10 @@ class _MiniPlayerState extends State<MiniPlayer> {
 
   void _playPause() async {
     if (_currentVideo == null) return;
-    
+
     final file = File(_currentVideo!.filePath);
     if (!await file.exists()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Audio file not found')),
-      );
+      showGlobalSnackBarMessage('Audio file not found');
       return;
     }
 
@@ -100,26 +101,32 @@ class _MiniPlayerState extends State<MiniPlayer> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
                   child: _currentVideo!.thumbnailUrl.isNotEmpty
-                    ? Image.network(
-                        _currentVideo!.thumbnailUrl,
-                        width: 48,
-                        height: 48,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return Container(
-                            width: 48,
-                            height: 48,
-                            color: Colors.grey[300],
-                            child: Icon(Icons.music_note, color: Colors.grey[600]),
-                          );
-                        },
-                      )
-                    : Container(
-                        width: 48,
-                        height: 48,
-                        color: Colors.grey[300],
-                        child: Icon(Icons.music_note, color: Colors.grey[600]),
-                      ),
+                      ? Image.network(
+                          _currentVideo!.thumbnailUrl,
+                          width: 48,
+                          height: 48,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) {
+                            return Container(
+                              width: 48,
+                              height: 48,
+                              color: Colors.grey[300],
+                              child: Icon(
+                                Icons.music_note,
+                                color: Colors.grey[600],
+                              ),
+                            );
+                          },
+                        )
+                      : Container(
+                          width: 48,
+                          height: 48,
+                          color: Colors.grey[300],
+                          child: Icon(
+                            Icons.music_note,
+                            color: Colors.grey[600],
+                          ),
+                        ),
                 ),
               ),
               SizedBox(width: 8),
@@ -144,10 +151,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                       SizedBox(height: 2),
                       Text(
                         _currentVideo!.channelName,
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 11,
-                        ),
+                        style: TextStyle(color: Colors.grey[600], fontSize: 11),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -184,4 +188,4 @@ class _MiniPlayerState extends State<MiniPlayer> {
       ),
     );
   }
-} 
+}

@@ -7,6 +7,9 @@ plugins {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation("io.github.junkfood02.youtubedl-android:library:0.16.0")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.14.3")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.14.3")
 }
 
 

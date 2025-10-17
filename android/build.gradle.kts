@@ -1,3 +1,5 @@
+import com.android.build.gradle.LibraryExtension
+
 allprojects {
     repositories {
         google()
@@ -14,6 +16,18 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(":app")
+}
+
+val mediaMetadataNamespace = "com.alexmercerind.flutter_media_metadata"
+
+subprojects {
+    if (name == "flutter_media_metadata") {
+        plugins.withId("com.android.library") {
+            (extensions.findByName("android") as? LibraryExtension)?.apply {
+                namespace = mediaMetadataNamespace
+            }
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {

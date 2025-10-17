@@ -4,6 +4,7 @@ import '../services/database_service.dart';
 import '../services/download_service.dart';
 import 'audio_controls.dart';
 import 'dart:io';
+import '../core/snackbar_bus.dart';
 
 class AudioPlayerBottomSheet {
   static void show(BuildContext context) {
@@ -18,10 +19,12 @@ class AudioPlayerBottomSheet {
 
 class _AudioPlayerBottomSheetContent extends StatefulWidget {
   @override
-  _AudioPlayerBottomSheetContentState createState() => _AudioPlayerBottomSheetContentState();
+  _AudioPlayerBottomSheetContentState createState() =>
+      _AudioPlayerBottomSheetContentState();
 }
 
-class _AudioPlayerBottomSheetContentState extends State<_AudioPlayerBottomSheetContent> {
+class _AudioPlayerBottomSheetContentState
+    extends State<_AudioPlayerBottomSheetContent> {
   List<DownloadedVideo> _playlist = [];
   DownloadedVideo? _currentVideo;
   int _currentIndex = 0;
@@ -44,7 +47,9 @@ class _AudioPlayerBottomSheetContentState extends State<_AudioPlayerBottomSheetC
   void _updateCurrentTrack() {
     final playing = DownloadService.globalPlayingNotifier.value;
     if (playing != null) {
-      final index = _playlist.indexWhere((video) => video.videoId == playing.videoId);
+      final index = _playlist.indexWhere(
+        (video) => video.videoId == playing.videoId,
+      );
       if (index != -1) {
         setState(() {
           _currentIndex = index;
@@ -58,7 +63,7 @@ class _AudioPlayerBottomSheetContentState extends State<_AudioPlayerBottomSheetC
     if (newIndex >= 0 && newIndex < _playlist.length) {
       final video = _playlist[newIndex];
       final file = File(video.filePath);
-      
+
       if (await file.exists()) {
         await DownloadService.playOrPause(
           video.videoId,
@@ -67,15 +72,13 @@ class _AudioPlayerBottomSheetContentState extends State<_AudioPlayerBottomSheetC
           channelName: video.channelName,
           thumbnailUrl: video.thumbnailUrl,
         );
-        
+
         setState(() {
           _currentIndex = newIndex;
           _currentVideo = video;
         });
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Audio file not found: ${video.title}')),
-        );
+        showGlobalSnackBarMessage('Audio file not found: ${video.title}');
       }
     }
   }
@@ -111,4 +114,4 @@ class _AudioPlayerBottomSheetContentState extends State<_AudioPlayerBottomSheetC
       ),
     );
   }
-} 
+}
