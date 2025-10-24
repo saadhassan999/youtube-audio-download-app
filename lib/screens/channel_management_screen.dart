@@ -5,22 +5,19 @@ import '../models/downloaded_video.dart';
 import '../services/youtube_service.dart';
 import '../services/database_service.dart';
 import '../services/download_service.dart';
-import '../services/notification_service.dart';
 import '../utils/youtube_utils.dart';
 import '../widgets/channel_search_field.dart';
 import '../widgets/mini_player.dart';
-import '../widgets/audio_player_bottom_sheet.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
 import 'dart:io';
 import 'package:sqflite/sqflite.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 class ChannelManagementScreen extends StatefulWidget {
+  const ChannelManagementScreen({super.key});
   @override
-  _ChannelManagementScreenState createState() =>
-      _ChannelManagementScreenState();
+  State<ChannelManagementScreen> createState() => _ChannelManagementScreenState();
 }
 
 class _ChannelManagementScreenState extends State<ChannelManagementScreen>
@@ -28,14 +25,17 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   List<Channel> _channels = [];
   Map<String, List<Video>> _channelVideos = {};
   Map<String, bool> _loadingVideos = {};
-  String? _currentlyPlayingId;
-  bool _isPlaying = false;
   late final VoidCallback _notifierListener;
   Map<String, bool> _downloading = {}; // Track per-video download status
   late AnimationController _logoController;
-  late Animation<Offset> _slideAnimation;
-  late Animation<double> _fadeAnimation;
-  bool _showLogo = true;
+  final _scroll = ScrollController();
+
+  void _openDownloads() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => DownloadManagerScreen()),
+    );
+  }
 
   @override
   void initState() {
@@ -43,10 +43,8 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     _loadChannels();
     _notifierListener = () {
       if (!mounted) return;
-      final playing = DownloadService.globalPlayingNotifier.value;
       setState(() {
-        _currentlyPlayingId = playing?.videoId;
-        _isPlaying = playing?.isPlaying ?? false;
+        // Update any playing state if needed
       });
     };
     DownloadService.globalPlayingNotifier.addListener(_notifierListener);
@@ -56,27 +54,13 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       vsync: this,
       duration: Duration(milliseconds: 900),
     );
-    _slideAnimation = Tween<Offset>(begin: Offset(0, 0), end: Offset(0, -1.2))
-        .animate(
-          CurvedAnimation(parent: _logoController, curve: Curves.easeInOut),
-        );
-    _fadeAnimation = Tween<double>(
-      begin: 1.0,
-      end: 0.0,
-    ).animate(CurvedAnimation(parent: _logoController, curve: Curves.easeIn));
-    // Start animation after a short delay
-    Future.delayed(Duration(milliseconds: 700), () {
-      if (mounted)
-        _logoController.forward().then(
-          (_) => setState(() => _showLogo = false),
-        );
-    });
   }
 
   @override
   void dispose() {
     DownloadService.globalPlayingNotifier.removeListener(_notifierListener);
     _logoController.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -154,279 +138,74 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     await DownloadService.playOrPause(videoId, filePath);
   }
 
-  Future<void> _syncChannel(Channel channel) async {
-    try {
-      // Show loading indicator
-      showGlobalSnackBar(SnackBar(content: Text('Syncing ${channel.name}...')));
-
-      // Fetch all videos for the channel
-      final videos = await YouTubeService.fetchChannelVideos(channel.id);
-      if (videos.isEmpty) {
-        if (!mounted) return;
-        showGlobalSnackBar(
-          SnackBar(content: Text('No videos found for ${channel.name}')),
-        );
-        return;
-      }
-
-      // Sort videos by published date (newest first)
-      videos.sort((a, b) => b.published.compareTo(a.published));
-
-      // Find videos that are not already downloaded
-      List<Video> videosToDownload = [];
-      for (final video in videos) {
-        // Check all available videos
-        final isDownloaded = await DownloadService.isVideoDownloaded(video.id);
-        if (!isDownloaded) {
-          videosToDownload.add(video);
-          if (videosToDownload.length >= 3)
-            break; // Limit to 3 videos for sync, but show all in UI
-        }
-      }
-
-      if (videosToDownload.isEmpty) {
-        if (!mounted) return;
-        showGlobalSnackBar(
-          SnackBar(
-            content: Text(
-              'All recent videos from ${channel.name} are already downloaded',
-            ),
-          ),
-        );
-        return;
-      }
-
-      // Download videos in chronological order (oldest first)
-      videosToDownload.sort((a, b) => a.published.compareTo(b.published));
-
-      int downloadedCount = 0;
-      String? lastDownloadedId;
-
-      for (final video in videosToDownload) {
-        if (!mounted) return;
-        setState(() {
-          _downloading[video.id] = true;
-        });
-
-        final downloaded = await DownloadService.downloadAudio(
-          videoId: video.id,
-          videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
-          title: video.title,
-          channelName: video.channelName,
-          thumbnailUrl: video.thumbnailUrl,
-          onProgress: (_, __) {},
-        );
-        DownloadService.consumeCancelledFlag(video.id);
-        if (!mounted) return;
-        setState(() {
-          _downloading[video.id] = false;
-        });
-
-        if (downloaded != null) {
-          downloadedCount++;
-          lastDownloadedId = video.id;
-
-          // Show notification for each download
-          await NotificationService.showNotification(
-            title: 'Sync Download Complete',
-            body: 'Downloaded: ${video.title}',
-          );
-        }
-      }
-      if (!mounted) return;
-      // Update the lastVideoId to the most recent downloaded video
-      if (lastDownloadedId != null) {
-        final updatedChannel = Channel(
-          id: channel.id,
-          name: channel.name,
-          description: channel.description,
-          thumbnailUrl: channel.thumbnailUrl,
-          lastVideoId: lastDownloadedId,
-        );
-        await DatabaseService.instance.updateChannel(updatedChannel);
-        if (!mounted) return;
-        showGlobalSnackBar(
-          SnackBar(content: Text('Channel updated: ${channel.name}')),
-        );
-      }
-
-      // Show final summary
-      showGlobalSnackBar(
-        SnackBar(
-          content: Text(
-            'Sync complete: Downloaded $downloadedCount videos from ${channel.name}',
-          ),
-        ),
-      );
-
-      // Refresh the channel data
-      await _loadChannels();
-      await _fetchAndSetVideos(channel.id);
-    } catch (e) {
-      if (!mounted) return;
-      showGlobalSnackBar(SnackBar(content: Text('Sync failed: $e')));
-    }
-  }
-
-  Future<void> _syncAllChannels() async {
-    try {
-      // Show loading indicator
-      showGlobalSnackBar(SnackBar(content: Text('Syncing all channels...')));
-
-      int totalDownloaded = 0;
-      int channelsProcessed = 0;
-
-      for (final channel in _channels) {
-        try {
-          // Fetch all videos for the channel
-          final videos = await YouTubeService.fetchChannelVideos(channel.id);
-          if (videos.isEmpty) continue;
-
-          // Sort videos by published date (newest first)
-          videos.sort((a, b) => b.published.compareTo(a.published));
-
-          // Find videos that are not already downloaded
-          List<Video> videosToDownload = [];
-          for (final video in videos.take(10)) {
-            // Check first 10 videos
-            final isDownloaded = await DownloadService.isVideoDownloaded(
-              video.id,
-            );
-            if (!isDownloaded) {
-              videosToDownload.add(video);
-              if (videosToDownload.length >= 5) break; // Limit to 5 videos
-            }
-          }
-
-          if (videosToDownload.isNotEmpty) {
-            // Download videos in chronological order (oldest first)
-            videosToDownload.sort((a, b) => a.published.compareTo(b.published));
-
-            String? lastDownloadedId;
-
-            for (final video in videosToDownload) {
-              final downloaded = await DownloadService.downloadAudio(
-                videoId: video.id,
-                videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
-                title: video.title,
-                channelName: video.channelName,
-                thumbnailUrl: video.thumbnailUrl,
-              );
-              DownloadService.consumeCancelledFlag(video.id);
-
-              if (downloaded != null) {
-                totalDownloaded++;
-                lastDownloadedId = video.id;
-
-                // Show notification for each download
-                await NotificationService.showNotification(
-                  title: 'Sync Download Complete',
-                  body: 'Downloaded: ${video.title} from ${channel.name}',
-                );
-              }
-            }
-
-            // Update the lastVideoId to the most recent downloaded video
-            if (lastDownloadedId != null) {
-              final updatedChannel = Channel(
-                id: channel.id,
-                name: channel.name,
-                description: channel.description,
-                thumbnailUrl: channel.thumbnailUrl,
-                lastVideoId: lastDownloadedId,
-              );
-              await DatabaseService.instance.updateChannel(updatedChannel);
-              if (!mounted) return;
-              showGlobalSnackBar(
-                SnackBar(content: Text('Channel updated: ${channel.name}')),
-              );
-            }
-          }
-
-          channelsProcessed++;
-
-          // Update progress
-          if (!mounted) return;
-          showGlobalSnackBar(
-            SnackBar(
-              content: Text(
-                'Processed $channelsProcessed/${_channels.length} channels...',
-              ),
-            ),
-          );
-        } catch (e) {
-          if (!mounted) return;
-          print('Error syncing channel ${channel.name}: $e');
-          // Continue with other channels even if one fails
-        }
-      }
-
-      // Show final summary
-      if (!mounted) return;
-      showGlobalSnackBar(
-        SnackBar(
-          content: Text(
-            'Global sync complete: Downloaded $totalDownloaded videos from $channelsProcessed channels',
-          ),
-        ),
-      );
-
-      // Refresh all channel data
-      await _loadChannels();
-      for (final channel in _channels) {
-        await _fetchAndSetVideos(channel.id);
-      }
-    } catch (e) {
-      if (!mounted) return;
-      showGlobalSnackBar(SnackBar(content: Text('Global sync failed: $e')));
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final double screenWidth = MediaQuery.of(context).size.width;
-    final double thumbnailSize = screenWidth * 0.22; // Responsive thumbnail
+    final ime = MediaQuery.viewInsetsOf(context).bottom; // keyboard
+    final safe = MediaQuery.paddingOf(context).bottom; // system nav
+    final topSafe = MediaQuery.paddingOf(context).top;
+    final bottomInset = ime > 0 ? ime : safe; // single source
+
+    // Debug log for Samsung verification
+    debugPrint(
+      '[Insets] IME=$ime SAFE=$safe TOP=$topSafe bottomInset=$bottomInset',
+    );
+
+    final keyboardVisible = ime > 0;
+    final contentBottomPadding = keyboardVisible ? 0.0 : safe;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          'YT AudioBox',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
-        ),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
-        elevation: 0.5,
-        actions: [
-          IconButton(
-            icon: Icon(Icons.download),
-            tooltip: 'Downloads',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => DownloadManagerScreen()),
-            ),
-          ),
-        ],
-      ),
+      resizeToAvoidBottomInset: true,
       backgroundColor: Colors.white,
+      bottomNavigationBar: const MiniPlayerHost(),
       body: SafeArea(
-        child: Stack(
-          children: [
-            Column(
-              children: [
-                SizedBox(height: _showLogo ? 120 : 0),
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
+        bottom: false,
+        child: AnimatedPadding(
+          duration: kThemeAnimationDuration,
+          curve: Curves.easeOut,
+          padding: EdgeInsets.only(bottom: contentBottomPadding),
+          child: CustomScrollView(
+            controller: _scroll,
+            keyboardDismissBehavior:
+                ScrollViewKeyboardDismissBehavior.onDrag,
+            slivers: [
+              SliverAppBar(
+                pinned: true,
+                elevation: 0,
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black87,
+                automaticallyImplyLeading: false,
+                titleSpacing: 16,
+                centerTitle: false,
+                title: const Text(
+                  'YT AudioBox',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 22,
                   ),
-                  child: ChannelSearchField(
+                ),
+                actions: [
+                  IconButton(
+                    tooltip: 'Downloads',
+                    icon: const Icon(Icons.download),
+                    onPressed: _openDownloads,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  child: _SearchBarContainer(
                     onChannelSelected: _onChannelSelected,
                     onManualAdd: _addChannel,
                   ),
                 ),
-                Expanded(
-                  child: _channels.isEmpty
-                      ? Center(
+              ),
+              if (_channels.isEmpty)
+                SliverToBoxAdapter(
+                  child: Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32.0),
                           child: Text(
                             'No channels added yet.',
                             style: TextStyle(
@@ -434,20 +213,20 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                               color: Colors.grey[600],
                             ),
                           ),
-                        )
-                      : ListView.separated(
-                          padding: EdgeInsets.symmetric(
-                            vertical: 8,
-                            horizontal: 8,
                           ),
+                  ),
+                )
+              else
+                SliverList.separated(
                           separatorBuilder: (_, __) => SizedBox(height: 12),
                           itemCount: _channels.length,
                           itemBuilder: (context, i) {
                             final channel = _channels[i];
                             final videos = _channelVideos[channel.id] ?? [];
-                            final isLoading =
-                                _loadingVideos[channel.id] ?? false;
-                            return Card(
+                    final isLoading = _loadingVideos[channel.id] ?? false;
+                    return Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Card(
                               elevation: 3,
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(16),
@@ -465,17 +244,13 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                 title: Row(
                                   children: [
                                     CircleAvatar(
-                                      backgroundImage:
-                                          channel.thumbnailUrl.isNotEmpty
+                                backgroundImage: channel.thumbnailUrl.isNotEmpty
                                           ? NetworkImage(channel.thumbnailUrl)
                                           : null,
                                       backgroundColor: Colors.red[100],
                                       radius: 20,
                                       child: channel.thumbnailUrl.isEmpty
-                                          ? Icon(
-                                              Icons.person,
-                                              color: Colors.red[700],
-                                            )
+                                    ? Icon(Icons.person, color: Colors.red[700])
                                           : null,
                                     ),
                                     SizedBox(width: 12),
@@ -495,39 +270,6 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     IconButton(
-                                      icon: Icon(Icons.sync),
-                                      tooltip:
-                                          'Sync Channel (Download older videos)',
-                                      onPressed: () async {
-                                        final confirm = await showDialog<bool>(
-                                          context: context,
-                                          builder: (context) => AlertDialog(
-                                            title: Text('Sync Channel'),
-                                            content: Text(
-                                              'This will download up to 3 older videos from "${channel.name}". Continue?',
-                                            ),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(false),
-                                                child: Text('Cancel'),
-                                              ),
-                                              TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(true),
-                                                child: Text('Sync'),
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                        if (confirm == true) {
-                                          await _syncChannel(channel);
-                                        }
-                                      },
-                                    ),
-                                    IconButton(
                                       icon: Icon(Icons.delete_outline),
                                       tooltip: 'Remove Channel',
                                       onPressed: () async {
@@ -535,39 +277,28 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                           context: context,
                                           builder: (context) => AlertDialog(
                                             title: Text('Remove Channel'),
-                                            content: Text(
-                                              'Are you sure you want to remove this channel?',
-                                            ),
+                                      content: Text('Are you sure you want to remove this channel?'),
                                             actions: [
                                               TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(false),
+                                          onPressed: () => Navigator.of(context).pop(false),
                                                 child: Text('Cancel'),
                                               ),
                                               TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(true),
+                                          onPressed: () => Navigator.of(context).pop(true),
                                                 child: Text('Yes'),
                                               ),
                                             ],
                                           ),
                                         );
                                         if (confirm == true) {
-                                          await DatabaseService.instance
-                                              .deleteChannel(channel.id);
+                                    await DatabaseService.instance.deleteChannel(channel.id);
                                           setState(() {
                                             _channelVideos.remove(channel.id);
                                           });
                                           _loadChannels();
                                           if (!mounted) return;
                                           showGlobalSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                'Channel removed: ${channel.name}',
-                                              ),
-                                            ),
+                                      SnackBar(content: Text('Channel removed: ${channel.name}')),
                                           );
                                         }
                                       },
@@ -578,244 +309,118 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                   if (isLoading)
                                     Padding(
                                       padding: EdgeInsets.all(16),
-                                      child: Center(
-                                        child: CircularProgressIndicator(),
-                                      ),
+                                child: Center(child: CircularProgressIndicator()),
                                     )
                                   else if (videos.isEmpty)
                                     Padding(
                                       padding: EdgeInsets.all(16),
                                       child: Text(
                                         'No videos found.',
-                                        style: TextStyle(
-                                          color: Colors.grey[600],
-                                        ),
+                                  style: TextStyle(color: Colors.grey[600]),
                                       ),
                                     )
                                   else
                                     ListView.separated(
                                       shrinkWrap: true,
                                       physics: NeverScrollableScrollPhysics(),
-                                      separatorBuilder: (_, __) => Divider(
-                                        height: 1,
-                                        color: Colors.grey[200],
-                                      ),
+                                separatorBuilder: (_, __) => Divider(height: 1, color: Colors.grey[200]),
                                       itemCount: videos.length,
                                       itemBuilder: (context, j) {
                                         final video = videos[j];
                                         return Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 6.0,
-                                            horizontal: 2.0,
-                                          ),
+                                    padding: const EdgeInsets.symmetric(vertical: 6.0, horizontal: 2.0),
                                           child: Row(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
+                                      crossAxisAlignment: CrossAxisAlignment.start,
                                             children: [
                                               ClipRRect(
-                                                borderRadius:
-                                                    BorderRadius.circular(8),
-                                                child:
-                                                    video
-                                                        .thumbnailUrl
-                                                        .isNotEmpty
-                                                    ? Image.network(
-                                                        video.thumbnailUrl,
-                                                        width: 80,
-                                                        height: 45,
-                                                        fit: BoxFit.cover,
-                                                      )
-                                                    : Container(
-                                                        width: 80,
-                                                        height: 45,
-                                                        color: Colors.grey[300],
-                                                      ),
+                                          borderRadius: BorderRadius.circular(8),
+                                          child: video.thumbnailUrl.isNotEmpty
+                                              ? Image.network(video.thumbnailUrl, width: 80, height: 45, fit: BoxFit.cover)
+                                              : Container(width: 80, height: 45, color: Colors.grey[300]),
                                               ),
                                               SizedBox(width: 10),
                                               Expanded(
                                                 child: Column(
-                                                  crossAxisAlignment:
-                                                      CrossAxisAlignment.start,
+                                            crossAxisAlignment: CrossAxisAlignment.start,
                                                   children: [
                                                     Text(
                                                       video.title,
-                                                      style: TextStyle(
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                        fontSize: 15,
-                                                      ),
+                                                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
                                                       maxLines: 2,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
+                                                overflow: TextOverflow.ellipsis,
                                                     ),
                                                     SizedBox(height: 4),
                                                     Text(
                                                       'Published: ${video.published.toLocal().toString().split(' ')[0]}',
-                                                      style: TextStyle(
-                                                        fontSize: 12,
-                                                        color: Colors.grey[700],
-                                                      ),
+                                                style: TextStyle(fontSize: 12, color: Colors.grey[700]),
                                                     ),
                                                     SizedBox(height: 6),
-                                                    FutureBuilder<
-                                                      DownloadedVideo?
-                                                    >(
-                                                      future: DatabaseService
-                                                          .instance
-                                                          .getDownloadedVideo(
-                                                            video.id,
-                                                          ),
+                                              FutureBuilder<DownloadedVideo?>(
+                                                future: DatabaseService.instance.getDownloadedVideo(video.id),
                                                       builder: (context, snapshot) {
-                                                        final record =
-                                                            snapshot.data;
-                                                        final status =
-                                                            record?.status ??
-                                                            '';
-                                                        final isManualDownloading =
-                                                            _downloading[video
-                                                                .id] ??
-                                                            false;
-                                                        final isDownloading =
-                                                            status ==
-                                                                'downloading' ||
-                                                            isManualDownloading;
-                                                        final isDownloaded =
-                                                            status ==
-                                                            'completed';
+                                                  final record = snapshot.data;
+                                                  final status = record?.status ?? '';
+                                                  final isManualDownloading = _downloading[video.id] ?? false;
+                                                  final isDownloading = status == 'downloading' || isManualDownloading;
+                                                  final isDownloaded = status == 'completed';
 
                                                         if (isDownloading) {
-                                                          return ValueListenableBuilder<
-                                                            Map<String, double>
-                                                          >(
-                                                            valueListenable:
-                                                                DownloadService
-                                                                    .downloadProgressNotifier,
-                                                            builder:
-                                                                (
-                                                                  context,
-                                                                  progressMap,
-                                                                  _,
-                                                                ) {
-                                                                  final progress =
-                                                                      progressMap[video
-                                                                          .id];
-                                                                  final normalized =
-                                                                      progress
-                                                                          ?.clamp(
-                                                                            0.0,
-                                                                            1.0,
-                                                                          );
-                                                                  final progressText =
-                                                                      normalized !=
-                                                                              null &&
-                                                                          normalized >
-                                                                              0
+                                                    return ValueListenableBuilder<Map<String, double>>(
+                                                      valueListenable: DownloadService.downloadProgressNotifier,
+                                                      builder: (context, progressMap, _) {
+                                                        final progress = progressMap[video.id];
+                                                        final normalized = progress?.clamp(0.0, 1.0);
+                                                        final progressText = normalized != null && normalized > 0
                                                                       ? '${(normalized * 100).toStringAsFixed(0)}%'
                                                                       : null;
 
                                                                   return Row(
                                                                     children: [
                                                                       SizedBox(
-                                                                        height:
-                                                                            18,
-                                                                        width:
-                                                                            18,
+                                                              height: 18,
+                                                              width: 18,
                                                                         child: CircularProgressIndicator(
-                                                                          value:
-                                                                              normalized !=
-                                                                                      null &&
-                                                                                  normalized >
-                                                                                      0
-                                                                              ? normalized
-                                                                              : null,
-                                                                          strokeWidth:
-                                                                              2,
-                                                                        ),
-                                                                      ),
-                                                                      SizedBox(
-                                                                        width:
-                                                                            12,
-                                                                      ),
+                                                                value: normalized != null && normalized > 0 ? normalized : null,
+                                                                strokeWidth: 2,
+                                                              ),
+                                                            ),
+                                                            SizedBox(width: 12),
                                                                       Expanded(
                                                                         child: Text(
-                                                                          progressText !=
-                                                                                  null
+                                                                progressText != null
                                                                               ? 'Download in progress ($progressText)'
                                                                               : 'Download in progress...',
-                                                                          style: TextStyle(
-                                                                            fontSize:
-                                                                                12,
-                                                                            fontStyle:
-                                                                                FontStyle.italic,
-                                                                          ),
+                                                                style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
                                                                         ),
                                                                       ),
                                                                       IconButton(
-                                                                        icon: Icon(
-                                                                          Icons
-                                                                              .close,
-                                                                          size:
-                                                                              20,
-                                                                          color:
-                                                                              Colors.red,
-                                                                        ),
-                                                                        tooltip:
-                                                                            'Cancel Download',
+                                                              icon: Icon(Icons.close, size: 20, color: Colors.red),
+                                                              tooltip: 'Cancel Download',
                                                                         onPressed: () async {
-                                                                          final confirm =
-                                                                              await showDialog<
-                                                                                bool
-                                                                              >(
+                                                                final confirm = await showDialog<bool>(
                                                                                 context: context,
-                                                                                builder:
-                                                                                    (
-                                                                                      context,
-                                                                                    ) => AlertDialog(
-                                                                                      title: Text(
-                                                                                        'Cancel Download',
-                                                                                      ),
-                                                                                      content: Text(
-                                                                                        'Are you sure you want to cancel this download?',
-                                                                                      ),
+                                                                  builder: (context) => AlertDialog(
+                                                                    title: Text('Cancel Download'),
+                                                                    content: Text('Are you sure you want to cancel this download?'),
                                                                                       actions: [
                                                                                         TextButton(
-                                                                                          onPressed: () =>
-                                                                                              Navigator.of(
-                                                                                                context,
-                                                                                              ).pop(
-                                                                                                false,
-                                                                                              ),
-                                                                                          child: Text(
-                                                                                            'No',
-                                                                                          ),
+                                                                        onPressed: () => Navigator.of(context).pop(false),
+                                                                        child: Text('No'),
                                                                                         ),
                                                                                         TextButton(
-                                                                                          onPressed: () =>
-                                                                                              Navigator.of(
-                                                                                                context,
-                                                                                              ).pop(
-                                                                                                true,
-                                                                                              ),
-                                                                                          child: Text(
-                                                                                            'Yes',
-                                                                                          ),
+                                                                        onPressed: () => Navigator.of(context).pop(true),
+                                                                        child: Text('Yes'),
                                                                                         ),
                                                                                       ],
                                                                                     ),
                                                                               );
-                                                                          if (confirm ==
-                                                                              true) {
-                                                                            await DownloadService.cancelDownload(
-                                                                              video.id,
-                                                                            );
-                                                                            if (!mounted)
-                                                                              return;
+                                                                if (confirm == true) {
+                                                                  await DownloadService.cancelDownload(video.id);
+                                                                  if (!mounted) return;
                                                                             setState(() {
                                                                               _downloading[video.id] = false;
                                                                             });
-                                                                            showGlobalSnackBarMessage(
-                                                                              'Download cancelled',
-                                                                            );
+                                                                  showGlobalSnackBarMessage('Download cancelled');
                                                                           }
                                                                         },
                                                                       ),
@@ -825,151 +430,69 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                                           );
                                                         }
 
-                                                        if (snapshot.connectionState ==
-                                                                ConnectionState
-                                                                    .waiting &&
-                                                            !_downloading
-                                                                .containsKey(
-                                                                  video.id,
-                                                                )) {
+                                                  if (snapshot.connectionState == ConnectionState.waiting && !_downloading.containsKey(video.id)) {
                                                           return SizedBox(
                                                             height: 32,
                                                             child: Center(
                                                               child: SizedBox(
                                                                 height: 16,
                                                                 width: 16,
-                                                                child:
-                                                                    CircularProgressIndicator(
-                                                                      strokeWidth:
-                                                                          2,
-                                                                    ),
+                                                          child: CircularProgressIndicator(strokeWidth: 2),
                                                               ),
                                                             ),
                                                           );
                                                         }
 
-                                                        return ValueListenableBuilder<
-                                                          PlayingAudio?
-                                                        >(
-                                                          valueListenable:
-                                                              DownloadService
-                                                                  .globalPlayingNotifier,
+                                                  return ValueListenableBuilder<PlayingAudio?>(
+                                                    valueListenable: DownloadService.globalPlayingNotifier,
                                                           builder: (context, playing, _) {
-                                                            final isThisPlaying =
-                                                                (playing?.videoId ==
-                                                                    video.id) &&
-                                                                (playing?.isPlaying ??
-                                                                    false);
+                                                      final isThisPlaying = (playing?.videoId == video.id) && (playing?.isPlaying ?? false);
                                                             return Row(
                                                               children: [
                                                                 ElevatedButton.icon(
                                                                   style: ElevatedButton.styleFrom(
-                                                                    backgroundColor:
-                                                                        isDownloaded
-                                                                        ? Colors
-                                                                              .green[600]
-                                                                        : Colors
-                                                                              .red[600],
-                                                                    foregroundColor:
-                                                                        Colors
-                                                                            .white,
-                                                                    shape: RoundedRectangleBorder(
-                                                                      borderRadius:
-                                                                          BorderRadius.circular(
-                                                                            8,
-                                                                          ),
-                                                                    ),
-                                                                    padding: EdgeInsets.symmetric(
-                                                                      horizontal:
-                                                                          12,
-                                                                      vertical:
-                                                                          6,
-                                                                    ),
+                                                              backgroundColor: isDownloaded ? Colors.green[600] : Colors.red[600],
+                                                              foregroundColor: Colors.white,
+                                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                                                   ),
                                                                   icon: Icon(
-                                                                    isThisPlaying
-                                                                        ? Icons
-                                                                              .pause
-                                                                        : isDownloaded
-                                                                        ? Icons
-                                                                              .play_arrow
-                                                                        : Icons
-                                                                              .download,
+                                                              isThisPlaying ? Icons.pause : isDownloaded ? Icons.play_arrow : Icons.download,
                                                                     size: 20,
                                                                   ),
                                                                   label: Text(
-                                                                    isThisPlaying
-                                                                        ? 'Pause'
-                                                                        : isDownloaded
-                                                                        ? 'Play'
-                                                                        : 'Download',
-                                                                    style: TextStyle(
-                                                                      fontWeight:
-                                                                          FontWeight
-                                                                              .w500,
-                                                                    ),
+                                                              isThisPlaying ? 'Pause' : isDownloaded ? 'Play' : 'Download',
+                                                              style: TextStyle(fontWeight: FontWeight.w500),
                                                                   ),
                                                                   onPressed: () async {
                                                                     if (isDownloaded) {
-                                                                      final filePath =
-                                                                          await DownloadService.getDownloadedFilePath(
-                                                                            video.id,
-                                                                          );
-                                                                      if (filePath !=
-                                                                          null) {
-                                                                        await _togglePlayPause(
-                                                                          video
-                                                                              .id,
-                                                                          filePath,
-                                                                        );
+                                                                final filePath = await DownloadService.getDownloadedFilePath(video.id);
+                                                                if (filePath != null) {
+                                                                  await _togglePlayPause(video.id, filePath);
                                                                       }
                                                                     } else {
                                                                       setState(() {
-                                                                        _downloading[video.id] =
-                                                                            true;
-                                                                      });
-                                                                      if (!mounted)
-                                                                        return;
-                                                                      showGlobalSnackBarMessage(
-                                                                        'Download started: ${video.title}',
-                                                                      );
+                                                                  _downloading[video.id] = true;
+                                                                });
+                                                                if (!mounted) return;
+                                                                showGlobalSnackBarMessage('Download started: ${video.title}');
                                                                       final result = await DownloadService.downloadAudio(
-                                                                        videoId:
-                                                                            video.id,
-                                                                        videoUrl:
-                                                                            'https://www.youtube.com/watch?v=${video.id}',
-                                                                        title: video
-                                                                            .title,
-                                                                        channelName:
-                                                                            video.channelName,
-                                                                        thumbnailUrl:
-                                                                            video.thumbnailUrl,
-                                                                        onProgress:
-                                                                            (
-                                                                              _,
-                                                                              __,
-                                                                            ) {},
-                                                                      );
-                                                                      if (!mounted)
-                                                                        return;
+                                                                  videoId: video.id,
+                                                                  videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
+                                                                  title: video.title,
+                                                                  channelName: video.channelName,
+                                                                  thumbnailUrl: video.thumbnailUrl,
+                                                                  onProgress: (_, __) {},
+                                                                );
+                                                                if (!mounted) return;
                                                                       setState(() {
-                                                                        _downloading[video.id] =
-                                                                            false;
-                                                                      });
-                                                                      if (!mounted)
-                                                                        return;
-                                                                      if (result !=
-                                                                          null) {
-                                                                        showGlobalSnackBarMessage(
-                                                                          'Download complete: ${video.title}',
-                                                                        );
-                                                                      } else if (!DownloadService.consumeCancelledFlag(
-                                                                        video
-                                                                            .id,
-                                                                      )) {
-                                                                        showGlobalSnackBarMessage(
-                                                                          'Download failed: ${video.title}',
-                                                                        );
+                                                                  _downloading[video.id] = false;
+                                                                });
+                                                                if (!mounted) return;
+                                                                if (result != null) {
+                                                                  showGlobalSnackBarMessage('Download complete: ${video.title}');
+                                                                } else if (!DownloadService.consumeCancelledFlag(video.id)) {
+                                                                  showGlobalSnackBarMessage('Download failed: ${video.title}');
                                                                       }
                                                                     }
                                                                   },
@@ -989,65 +512,48 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                       },
                                     ),
                                 ],
+                        ),
                               ),
                             );
                           },
                         ),
-                ),
-              ],
-            ),
-            // Animated logo overlay
-            if (_showLogo)
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: SlideTransition(
-                  position: _slideAnimation,
-                  child: FadeTransition(
-                    opacity: _fadeAnimation,
-                    child: Container(
-                      color: Colors.white,
-                      padding: EdgeInsets.only(top: 48, bottom: 24),
-                      alignment: Alignment.center,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Image.asset('assets/splash_logo.png', width: 120),
-                          SizedBox(height: 16),
-                          Text(
-                            'YT AudioBox',
-                            style: TextStyle(
-                              fontSize: 28,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.red[700],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            // MiniPlayer at the bottom, outside the Column
-            Positioned(left: 0, right: 0, bottom: 0, child: MiniPlayer()),
-          ],
+              const SliverToBoxAdapter(child: SizedBox(height: 16)),
+            ],
+          ),
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          AudioPlayerBottomSheet.show(context);
-        },
-        child: Icon(Icons.music_note),
-        tooltip: 'Audio Controls',
-        backgroundColor: Colors.red[600],
-        foregroundColor: Colors.white,
-        elevation: 2,
       ),
     );
   }
 }
 
+class _SearchBarContainer extends StatelessWidget {
+  const _SearchBarContainer({
+    required this.onChannelSelected,
+    required this.onManualAdd,
+  });
+
+  final Function(Channel) onChannelSelected;
+  final Function(String) onManualAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 64),
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        elevation: 0,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          child: ChannelSearchField(
+            onChannelSelected: onChannelSelected,
+            onManualAdd: onManualAdd,
+          ),
+        ),
+      ),
+    );
+  }
+}
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await DatabaseService.instance.db;

@@ -3,13 +3,11 @@ import '../models/downloaded_video.dart';
 import '../services/database_service.dart';
 import '../services/download_service.dart';
 import '../widgets/mini_player.dart';
-import '../widgets/audio_player_bottom_sheet.dart';
 import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'package:flutter_media_metadata/flutter_media_metadata.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:flutter/widgets.dart';
 import '../../main.dart';
 import '../core/snackbar_bus.dart';
 
@@ -25,7 +23,6 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
   final ValueNotifier<List<DownloadedVideo>> downloadedVideosNotifier =
       ValueNotifier([]);
   bool _isLoading = true;
-  bool _scannedForOrphans = false;
   List<File> _orphanedFiles = [];
 
   @override
@@ -97,7 +94,6 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
     final dbPaths = dbVideos.map((v) => v.filePath).toSet();
     setState(() {
       _orphanedFiles = files.where((f) => !dbPaths.contains(f.path)).toList();
-      _scannedForOrphans = true;
     });
   }
 
@@ -156,6 +152,7 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
         ],
       ),
       backgroundColor: Colors.white,
+      bottomNavigationBar: const MiniPlayerHost(),
       body: SafeArea(
         child: Column(
           children: [
@@ -387,19 +384,8 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                       },
                     ),
             ),
-            MiniPlayer(),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          AudioPlayerBottomSheet.show(context);
-        },
-        child: Icon(Icons.music_note),
-        tooltip: 'Audio Controls',
-        backgroundColor: Colors.red[600],
-        foregroundColor: Colors.white,
-        elevation: 2,
       ),
     );
   }

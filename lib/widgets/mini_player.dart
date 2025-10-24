@@ -7,8 +7,10 @@ import 'dart:io';
 import '../core/snackbar_bus.dart';
 
 class MiniPlayer extends StatefulWidget {
+  const MiniPlayer({super.key});
+
   @override
-  _MiniPlayerState createState() => _MiniPlayerState();
+  State<MiniPlayer> createState() => _MiniPlayerState();
 }
 
 class _MiniPlayerState extends State<MiniPlayer> {
@@ -30,22 +32,42 @@ class _MiniPlayerState extends State<MiniPlayer> {
     super.dispose();
   }
 
-  void _updatePlayerState() async {
+  Future<void> _updatePlayerState() async {
     final playing = DownloadService.globalPlayingNotifier.value;
-    if (playing != null && playing.isPlaying) {
-      // Get the current video info
-      final video = await DatabaseService.instance.getDownloadedVideo(
-        playing.videoId,
-      );
-      setState(() {
-        _currentVideo = video;
-        _isPlaying = playing.isPlaying;
-      });
-    } else {
-      setState(() {
-        _isPlaying = false;
-      });
+    if (!mounted) return;
+
+    if (playing == null) {
+      if (_currentVideo != null || _isPlaying) {
+        setState(() {
+          _currentVideo = null;
+          _isPlaying = false;
+        });
+      }
+      return;
     }
+
+    final targetVideoId = playing.videoId;
+    DownloadedVideo? video = _currentVideo;
+
+    if (video == null || video.videoId != targetVideoId) {
+      final fetchedVideo =
+          await DatabaseService.instance.getDownloadedVideo(targetVideoId);
+      if (!mounted) return;
+
+      final latest = DownloadService.globalPlayingNotifier.value;
+      if (latest == null || latest.videoId != targetVideoId) {
+        // State changed while fetching; a new update will follow.
+        return;
+      }
+      video = fetchedVideo;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _currentVideo = video;
+      _isPlaying = playing.isPlaying;
+    });
   }
 
   void _playPause() async {
@@ -70,15 +92,24 @@ class _MiniPlayerState extends State<MiniPlayer> {
     AudioPlayerBottomSheet.show(context);
   }
 
+  Future<void> _clearSession() async {
+    await DownloadService.clearPlaybackSession();
+    if (!mounted) return;
+    setState(() {
+      _currentVideo = null;
+      _isPlaying = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     // Don't show if nothing is playing
-    if (_currentVideo == null || !_isPlaying) {
-      return SizedBox.shrink();
+    if (_currentVideo == null) {
+      return const SizedBox.shrink();
     }
 
     return SafeArea(
-      minimum: EdgeInsets.only(bottom: 0),
+      top: false,
       child: Container(
         height: 64, // slightly reduced height
         decoration: BoxDecoration(
@@ -171,14 +202,22 @@ class _MiniPlayerState extends State<MiniPlayer> {
                     ),
                     color: Theme.of(context).primaryColor,
                     padding: EdgeInsets.zero,
-                    constraints: BoxConstraints(),
+                    constraints: const BoxConstraints(),
                   ),
                   IconButton(
                     onPressed: _showFullPlayer,
-                    icon: Icon(Icons.skip_next, size: 22),
+                    icon: const Icon(Icons.expand_less, size: 22),
                     color: Colors.grey[600],
                     padding: EdgeInsets.zero,
-                    constraints: BoxConstraints(),
+                    constraints: const BoxConstraints(),
+                  ),
+                  IconButton(
+                    onPressed: _clearSession,
+                    icon: const Icon(Icons.close, size: 20),
+                    color: Colors.grey[500],
+                    tooltip: 'Close player',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
                   ),
                 ],
               ),
@@ -186,6 +225,34 @@ class _MiniPlayerState extends State<MiniPlayer> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class MiniPlayerHost extends StatelessWidget {
+  const MiniPlayerHost({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: DownloadService.globalSessionActive,
+      builder: (context, sessionActive, _) {
+        return ValueListenableBuilder<PlayingAudio?>(
+          valueListenable: DownloadService.globalPlayingNotifier,
+          builder: (context, playing, __) {
+            final show = DownloadService.shouldShowMiniPlayer(
+              sessionActive: sessionActive,
+              playing: playing,
+            );
+            return AnimatedSwitcher(
+              duration: kThemeAnimationDuration,
+              child: show
+                  ? MiniPlayer(key: ValueKey(playing?.videoId ?? 'session'))
+                  : const SizedBox.shrink(),
+            );
+          },
+        );
+      },
     );
   }
 }

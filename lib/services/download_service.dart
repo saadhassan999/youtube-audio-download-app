@@ -29,6 +29,8 @@ class DownloadService {
   // Global notifier for currently playing videoId and playing state
   static final ValueNotifier<PlayingAudio?> globalPlayingNotifier =
       ValueNotifier<PlayingAudio?>(null);
+  static final ValueNotifier<bool> globalSessionActive =
+      ValueNotifier<bool>(false);
   static final ValueNotifier<int> downloadedVideosChanged = ValueNotifier<int>(
     0,
   );
@@ -147,10 +149,13 @@ class DownloadService {
   static const String _lastVideoIdKey = 'global_last_video_id';
   static const String _lastVideoPositionKey = 'global_last_video_position';
   static const String _lastVideoStateKey = 'global_last_video_state';
+  static const String _sessionActiveKey = 'global_session_active';
+  static bool _hasActiveSession = false;
 
   static void ensureInitialized() {
     if (_initialized) return;
     _initialized = true;
+    globalPlayingNotifier.addListener(_updateMiniPlayerVisibility);
     globalAudioPlayer.playerStateStream.listen((state) {
       final current = globalPlayingNotifier.value;
       if (state.processingState == ProcessingState.completed ||
@@ -175,10 +180,14 @@ class DownloadService {
   }
 
   static Future<void> stopGlobalAudio() async {
-    if (globalAudioPlayer.playing) {
+    if (!_audioPlayerInitialized) return;
+    try {
       await globalAudioPlayer.stop();
+    } catch (_) {}
+    if (globalPlayingNotifier.value != null) {
       globalPlayingNotifier.value = null;
     }
+    await saveGlobalPlayerState();
   }
 
   @pragma('vm:entry-point')
@@ -575,9 +584,69 @@ class DownloadService {
     return _recentlyCancelledDownloads.remove(videoId);
   }
 
+  static bool get hasActiveSession => _hasActiveSession;
+
+  static bool shouldShowMiniPlayer({
+    PlayingAudio? playing,
+    bool? sessionActive,
+  }) {
+    final session = sessionActive ?? _hasActiveSession;
+    if (!session) return false;
+    playing ??= globalPlayingNotifier.value;
+    if (playing != null) {
+      return true;
+    }
+    if (!_audioPlayerInitialized) {
+      return false;
+    }
+    final state = globalAudioPlayer.playerState;
+    if (state.playing) return true;
+    if (state.processingState == ProcessingState.buffering) return true;
+    return false;
+  }
+
+  static Future<void> clearPlaybackSession() async {
+    ensureInitialized();
+    final closingVideoId = globalPlayingNotifier.value?.videoId;
+    await stopGlobalAudio();
+    await _setSessionActive(false, closingVideoId: closingVideoId);
+    globalPlayingNotifier.value = null;
+  }
+
+  static Future<void> _setSessionActive(
+    bool active, {
+    String? closingVideoId,
+  }) async {
+    if (_hasActiveSession == active) return;
+    _hasActiveSession = active;
+    globalSessionActive.value = active;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_sessionActiveKey, active);
+    if (!active) {
+      await prefs.remove(_lastVideoIdKey);
+      await prefs.remove(_lastVideoPositionKey);
+      await prefs.remove(_lastVideoStateKey);
+      if (closingVideoId != null) {
+        await prefs.remove('audio_position_$closingVideoId');
+      }
+    }
+  }
+
+  static void _updateMiniPlayerVisibility() {
+    if (_hasActiveSession && !globalSessionActive.value) {
+      globalSessionActive.value = true;
+    }
+  }
+
   // Call this on app startup
   static Future<void> restoreGlobalPlayerState() async {
     final prefs = await SharedPreferences.getInstance();
+    final storedSessionActive = prefs.getBool(_sessionActiveKey) ?? false;
+    _hasActiveSession = storedSessionActive;
+    globalSessionActive.value = storedSessionActive;
+    if (!storedSessionActive) {
+      return;
+    }
     final lastVideoId = prefs.getString(_lastVideoIdKey);
     final lastPosition = prefs.getInt(_lastVideoPositionKey);
     final lastState = prefs.getString(_lastVideoStateKey);
@@ -612,10 +681,15 @@ class DownloadService {
           video.videoId,
           lastState == 'playing',
         );
+        await _setSessionActive(true);
         if (lastState == 'playing') {
           await globalAudioPlayer.play();
         }
+      } else {
+        await _setSessionActive(false);
       }
+    } else {
+      await _setSessionActive(false);
     }
   }
 
@@ -633,6 +707,7 @@ class DownloadService {
         _lastVideoStateKey,
         globalAudioPlayer.playing ? 'playing' : 'paused',
       );
+      await prefs.setBool(_sessionActiveKey, true);
     }
   }
 
@@ -693,11 +768,13 @@ class DownloadService {
     } else if (globalPlayingNotifier.value?.videoId == videoId &&
         !(globalPlayingNotifier.value?.isPlaying ?? false)) {
       globalPlayingNotifier.value = PlayingAudio(videoId, true);
+      await _setSessionActive(true);
       await globalAudioPlayer.play();
       await saveGlobalPlayerState();
     } else {
       await stopGlobalAudio();
       globalPlayingNotifier.value = PlayingAudio(videoId, true);
+      await _setSessionActive(true);
       await globalAudioPlayer.play();
       await saveGlobalPlayerState();
     }

@@ -1,11 +1,13 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:flutter/material.dart';
+
+import '../core/snackbar_bus.dart';
 import '../models/channel.dart';
 import '../services/database_service.dart';
 import '../services/youtube_service.dart';
 import '../utils/youtube_utils.dart';
-import '../core/snackbar_bus.dart';
 
 class ChannelSearchField extends StatefulWidget {
   final Function(Channel) onChannelSelected;
@@ -18,47 +20,59 @@ class ChannelSearchField extends StatefulWidget {
   }) : super(key: key);
 
   @override
-  _ChannelSearchFieldState createState() => _ChannelSearchFieldState();
+  State<ChannelSearchField> createState() => _ChannelSearchFieldState();
 }
 
-class _ChannelSearchFieldState extends State<ChannelSearchField> {
+class _ChannelSearchFieldState extends State<ChannelSearchField>
+    with WidgetsBindingObserver {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _focusNode = FocusNode();
+  final LayerLink _layerLink = LayerLink();
+  final GlobalKey _targetKey = GlobalKey();
+
   List<Channel> _suggestions = [];
   bool _isLoading = false;
-  bool _showSuggestions = false;
   Timer? _debounceTimer;
   String _currentQuery = '';
   String? _statusMessage;
   bool _statusIsError = false;
   int _searchRequestId = 0;
 
-  // Add this state
+  OverlayEntry? _overlayEntry;
   @override
   void initState() {
     super.initState();
-    _focusNode.addListener(() {
-      if (!_focusNode.hasFocus) {
-        setState(() {
-          _showSuggestions = false;
-        });
-      }
-    });
+    WidgetsBinding.instance.addObserver(this);
+    _focusNode.addListener(_handleFocusChange);
   }
 
   @override
   void dispose() {
     YouTubeService.cancelActiveSearch();
+    _closeOverlay();
     _controller.dispose();
-    _focusNode.dispose();
+    _focusNode
+      ..removeListener(_handleFocusChange)
+      ..dispose();
     _debounceTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // Rebuild overlay when keyboard or viewport metrics change.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _updateOverlay();
+      }
+    });
   }
 
   void _onTextChanged(String query) {
     _currentQuery = query;
 
-    // Cancel previous timer
     _debounceTimer?.cancel();
     YouTubeService.cancelActiveSearch();
 
@@ -66,18 +80,16 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
     if (trimmed.isEmpty) {
       setState(() {
         _suggestions = [];
-        _showSuggestions = false;
         _isLoading = false;
         _statusMessage = null;
         _statusIsError = false;
       });
+      _updateOverlay();
       return;
     }
 
-    // Debounce the search to avoid too many API calls
     _debounceTimer = Timer(const Duration(milliseconds: 350), () async {
       if (_currentQuery.trim() == trimmed) {
-        // Only search if query hasn't changed
         await _searchChannels(trimmed);
       }
     });
@@ -90,14 +102,15 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
 
     setState(() {
       _isLoading = true;
-      _showSuggestions = true;
       _statusMessage = null;
       _statusIsError = false;
     });
+    _updateOverlay();
 
     try {
       final suggestions = await YouTubeService.getChannelSuggestions(query);
       if (requestId != _searchRequestId) return;
+
       setState(() {
         _suggestions = suggestions;
         _isLoading = false;
@@ -107,6 +120,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
           _statusIsError = false;
         }
       });
+      _updateOverlay();
     } on RateLimitException catch (e) {
       if (requestId != _searchRequestId) return;
       final retryHint = e.retryAfter == null
@@ -119,6 +133,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
         _statusIsError = true;
       });
       _showSnackBar('YouTube rate limit reached. $retryHint');
+      _updateOverlay();
     } on ChannelSearchException catch (e) {
       if (e.isCancellation || requestId != _searchRequestId) return;
       setState(() {
@@ -128,6 +143,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
         _statusIsError = true;
       });
       _showSnackBar(e.message);
+      _updateOverlay();
     } catch (e) {
       if (requestId != _searchRequestId) return;
       setState(() {
@@ -137,14 +153,13 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
             'Something went wrong while searching. Please check your connection and try again.';
         _statusIsError = true;
       });
-      print('Error searching channels: $e');
       _showSnackBar('Channel search failed. Please try again.');
+      _updateOverlay();
     }
   }
 
   void _onSuggestionSelected(Channel channel) async {
     YouTubeService.cancelActiveSearch();
-    // Check if channel is already added
     final existingChannels = await DatabaseService.instance.getChannels();
     final isAlreadyAdded = existingChannels.any((c) => c.id == channel.id);
 
@@ -155,18 +170,17 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
       return;
     }
 
-    // Add the channel
     await DatabaseService.instance.addChannel(channel);
     widget.onChannelSelected(channel);
 
-    // Clear the search field
     _controller.clear();
     setState(() {
       _suggestions = [];
-      _showSuggestions = false;
       _statusMessage = null;
       _statusIsError = false;
     });
+    _focusNode.unfocus();
+    _updateOverlay();
 
     showGlobalSnackBarMessage('Added channel: ${channel.name}');
   }
@@ -179,10 +193,11 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
       _controller.clear();
       setState(() {
         _suggestions = [];
-        _showSuggestions = false;
         _statusMessage = null;
         _statusIsError = false;
       });
+      _focusNode.unfocus();
+      _updateOverlay();
     }
   }
 
@@ -209,10 +224,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
   Widget _buildSuggestionsContent(BuildContext context) {
     if (_isLoading) {
       return ListView.builder(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
+        padding: EdgeInsets.zero,
         itemCount: 5,
-        padding: EdgeInsets.symmetric(vertical: 4),
         itemBuilder: (context, index) {
           return ListTile(
             leading: Container(
@@ -233,7 +246,6 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
             ),
             subtitle: Container(
               height: 12,
-              width: double.infinity,
               decoration: BoxDecoration(
                 color: Colors.grey.shade200,
                 borderRadius: BorderRadius.circular(4),
@@ -262,12 +274,12 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
 
     return ListView.builder(
       shrinkWrap: true,
+      padding: EdgeInsets.zero,
       itemCount: _suggestions.length,
       itemBuilder: (context, index) {
         final channel = _suggestions[index];
-        final handleText = channel.handle?.isNotEmpty == true
-            ? channel.handle
-            : null;
+        final handleText =
+            channel.handle?.isNotEmpty == true ? channel.handle : null;
         final hasSubscriberCount =
             !channel.hiddenSubscriberCount && channel.subscriberCount != null;
         final subscriberText = hasSubscriberCount
@@ -315,8 +327,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
                   handleText,
                   style: TextStyle(
                     fontSize: 12,
-                    color:
-                        Theme.of(context).textTheme.bodySmall?.color ??
+                    color: Theme.of(context).textTheme.bodySmall?.color ??
                         Colors.grey[600],
                   ),
                 ),
@@ -333,21 +344,143 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
     );
   }
 
+  bool get _shouldShowOverlay {
+    return _focusNode.hasFocus &&
+        (_isLoading ||
+            _suggestions.isNotEmpty ||
+            (_statusMessage != null && _statusMessage!.isNotEmpty));
+  }
+
+  void _handleFocusChange() {
+    if (_focusNode.hasFocus) {
+      _updateOverlay();
+    } else {
+      _closeOverlay();
+    }
+  }
+
+  void _updateOverlay() {
+    if (!mounted) return;
+    if (!_shouldShowOverlay) {
+      _closeOverlay();
+      return;
+    }
+
+    if (_overlayEntry == null) {
+      final overlay = Overlay.of(context, rootOverlay: true);
+      _overlayEntry = OverlayEntry(builder: _buildOverlay);
+      overlay.insert(_overlayEntry!);
+    } else {
+      _overlayEntry!.markNeedsBuild();
+    }
+  }
+
+  void _closeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  Widget _buildOverlay(BuildContext context) {
+    final theme = Theme.of(this.context);
+    final mediaQuery = MediaQuery.of(this.context);
+    final ime = mediaQuery.viewInsets.bottom;
+    final safe = mediaQuery.padding.bottom;
+    final bottomInset = ime > 0 ? ime : safe;
+
+    final renderBox =
+        _targetKey.currentContext?.findRenderObject() as RenderBox?;
+    final fieldSize = renderBox?.size ?? Size.zero;
+    final fieldOrigin = renderBox?.localToGlobal(Offset.zero) ?? Offset.zero;
+    final fieldHeight =
+        fieldSize.height > 0 ? fieldSize.height : kMinInteractiveDimension;
+    final fieldWidth =
+        fieldSize.width > 0 ? fieldSize.width : mediaQuery.size.width;
+
+    const horizontalGutter = 16.0;
+    final screenWidth = mediaQuery.size.width;
+    final screenHeight = mediaQuery.size.height;
+
+    final maxDropdownWidth = screenWidth - (horizontalGutter * 2);
+    final minDropdownWidth = math.min(240.0, maxDropdownWidth);
+    final maxWidthForClamp = math.max(240.0, maxDropdownWidth);
+    final dropdownWidth = fieldWidth
+        .clamp(minDropdownWidth, maxWidthForClamp)
+        .toDouble();
+
+    final minLeft = horizontalGutter;
+    final maxLeft = math.max(minLeft, screenWidth - dropdownWidth - horizontalGutter);
+    double left = fieldOrigin.dx;
+    left = left.clamp(minLeft, maxLeft).toDouble();
+
+    final desiredTop = fieldOrigin.dy + fieldHeight + 8.0;
+    final maxTop = math.max(
+      0.0,
+      screenHeight - bottomInset - 200.0,
+    );
+    final top = desiredTop.clamp(0.0, maxTop).toDouble();
+
+    final availableSpace = (screenHeight - bottomInset) - top;
+    double dropdownMaxHeight;
+    if (availableSpace.isFinite && availableSpace > 0) {
+      dropdownMaxHeight = math.min(availableSpace, screenHeight * 0.6);
+      if (availableSpace >= 200.0) {
+        dropdownMaxHeight = math.max(200.0, dropdownMaxHeight);
+      }
+    } else {
+      dropdownMaxHeight = screenHeight * 0.6;
+    }
+    dropdownMaxHeight =
+        dropdownMaxHeight.clamp(0.0, screenHeight).toDouble();
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () {
+              _focusNode.unfocus();
+              _closeOverlay();
+            },
+          ),
+        ),
+        Positioned(
+          left: left,
+          top: top,
+          width: dropdownWidth,
+          child: Material(
+            elevation: 8,
+            borderRadius: BorderRadius.circular(12),
+            color: theme.cardColor,
+            clipBehavior: Clip.antiAlias,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: dropdownMaxHeight,
+              ),
+              child: _buildSuggestionsContent(context),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Search input field
-        Padding(
+    return CompositedTransformTarget(
+      link: _layerLink,
+      child: KeyedSubtree(
+        key: _targetKey,
+        child: Padding(
           padding: const EdgeInsets.all(8.0),
-          child: TextField(
-            controller: _controller,
-            focusNode: _focusNode,
-            decoration: InputDecoration(
-              labelText: 'Search for YouTube channels...',
-              hintText: 'Type channel name (e.g., "PewDiePie", "MrBeast")',
-              prefixIcon: Icon(Icons.search),
-              suffixIcon: _isLoading
+        child: TextField(
+          controller: _controller,
+          focusNode: _focusNode,
+          style: const TextStyle(color: Colors.black87),
+          decoration: InputDecoration(
+            labelText: 'Search for YouTube channels...',
+            hintText: 'Type channel name (e.g., "PewDiePie", "MrBeast")',
+            prefixIcon: Icon(Icons.search),
+            suffixIcon: _isLoading
                   ? Padding(
                       padding: EdgeInsets.all(12),
                       child: SizedBox(
@@ -355,37 +488,27 @@ class _ChannelSearchFieldState extends State<ChannelSearchField> {
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
-                    )
-                  : null,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-            onChanged: _onTextChanged,
-            onSubmitted: (_) => _onManualAdd(),
-          ),
-        ),
-
-        // Suggestions list
-        if (_showSuggestions &&
-            (_suggestions.isNotEmpty || _isLoading || _statusMessage != null))
-          Container(
-            constraints: BoxConstraints(maxHeight: 300),
-            margin: EdgeInsets.symmetric(horizontal: 8),
-            decoration: BoxDecoration(
-              color: Theme.of(context).cardColor,
+                  )
+                : null,
+            border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(8),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black12,
-                  blurRadius: 4,
-                  offset: Offset(0, 2),
-                ),
-              ],
             ),
-            child: _buildSuggestionsContent(context),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: Colors.black26),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(8),
+              borderSide: const BorderSide(color: Colors.black12),
+            ),
+            filled: true,
+            fillColor: Colors.white,
           ),
-      ],
+          onChanged: _onTextChanged,
+          onSubmitted: (_) => _onManualAdd(),
+        ),
+      ),
+      ),
     );
   }
 }
