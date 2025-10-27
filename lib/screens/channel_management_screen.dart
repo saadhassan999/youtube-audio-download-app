@@ -27,6 +27,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   Map<String, bool> _loadingVideos = {};
   late final VoidCallback _notifierListener;
   Map<String, bool> _downloading = {}; // Track per-video download status
+  Map<String, bool> _streaming = {}; // Track streaming state
   late AnimationController _logoController;
   final _scroll = ScrollController();
 
@@ -127,7 +128,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     }
   }
 
-  Future<void> _togglePlayPause(String videoId, String filePath) async {
+  Future<void> _playDownloadedVideo(Video video, String filePath) async {
     final file = File(filePath);
     if (!await file.exists()) {
       showGlobalSnackBar(
@@ -135,7 +136,50 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       );
       return;
     }
-    await DownloadService.playOrPause(videoId, filePath);
+    await DownloadService.playOrPause(
+      video.id,
+      filePath,
+      title: video.title,
+      channelName: video.channelName,
+      thumbnailUrl: video.thumbnailUrl,
+    );
+  }
+
+  Future<void> _handlePlay(Video video) async {
+    final filePath = await DownloadService.getDownloadedFilePath(video.id);
+    if (filePath != null) {
+      await _playDownloadedVideo(video, filePath);
+      return;
+    }
+    final current = DownloadService.globalPlayingNotifier.value;
+    final shouldShowSpinner =
+        !(current?.videoId == video.id && !(current?.isLocal ?? true));
+    if (shouldShowSpinner) {
+      setState(() {
+        _streaming[video.id] = true;
+      });
+    }
+    try {
+      await DownloadService.playStream(
+        videoId: video.id,
+        videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
+        title: video.title,
+        channelName: video.channelName,
+        thumbnailUrl: video.thumbnailUrl,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showGlobalSnackBar(
+        SnackBar(content: Text('Failed to play audio: $e')),
+      );
+    } finally {
+      if (!mounted) return;
+      if (shouldShowSpinner) {
+        setState(() {
+          _streaming[video.id] = false;
+        });
+      }
+    }
   }
 
   @override
@@ -446,63 +490,164 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                                   return ValueListenableBuilder<PlayingAudio?>(
                                                     valueListenable: DownloadService.globalPlayingNotifier,
                                                           builder: (context, playing, _) {
-                                                      final isThisPlaying = (playing?.videoId == video.id) && (playing?.isPlaying ?? false);
-                                                            return Row(
-                                                              children: [
-                                                                ElevatedButton.icon(
-                                                                  style: ElevatedButton.styleFrom(
-                                                              backgroundColor: isDownloaded ? Colors.green[600] : Colors.red[600],
-                                                              foregroundColor: Colors.white,
-                                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                                                                  ),
-                                                                  icon: Icon(
-                                                              isThisPlaying ? Icons.pause : isDownloaded ? Icons.play_arrow : Icons.download,
-                                                                    size: 20,
-                                                                  ),
-                                                                  label: Text(
-                                                              isThisPlaying ? 'Pause' : isDownloaded ? 'Play' : 'Download',
-                                                              style: TextStyle(fontWeight: FontWeight.w500),
-                                                                  ),
-                                                                  onPressed: () async {
-                                                                    if (isDownloaded) {
-                                                                final filePath = await DownloadService.getDownloadedFilePath(video.id);
-                                                                if (filePath != null) {
-                                                                  await _togglePlayPause(video.id, filePath);
-                                                                      }
-                                                                    } else {
-                                                                      setState(() {
+                                                      final isSameVideo = playing?.videoId == video.id;
+                                                      final isThisPlaying =
+                                                          isSameVideo && (playing?.isPlaying ?? false);
+                                                      final isStreaming = _streaming[video.id] ?? false;
+                                                      final playLabel = isStreaming
+                                                          ? 'Loading...'
+                                                          : isThisPlaying
+                                                              ? 'Pause'
+                                                              : isSameVideo
+                                                                  ? 'Resume'
+                                                                  : 'Play';
+                                                      final playIcon = isThisPlaying
+                                                          ? Icons.pause
+                                                          : Icons.play_arrow;
+
+                                                      final playButton = ElevatedButton(
+                                                        style: ElevatedButton.styleFrom(
+                                                          backgroundColor: Colors.green[600],
+                                                          padding:
+                                                              const EdgeInsets.symmetric(vertical: 10),
+                                                          shape: RoundedRectangleBorder(
+                                                            borderRadius: BorderRadius.circular(8),
+                                                          ),
+                                                        ),
+                                                        onPressed: isStreaming
+                                                            ? null
+                                                            : () => _handlePlay(video),
+                                                        child: Row(
+                                                          mainAxisAlignment: MainAxisAlignment.center,
+                                                          mainAxisSize: MainAxisSize.min,
+                                                          children: [
+                                                            if (isStreaming)
+                                                              const SizedBox(
+                                                                width: 16,
+                                                                height: 16,
+                                                                child: CircularProgressIndicator(
+                                                                  strokeWidth: 2,
+                                                                  color: Colors.white,
+                                                                ),
+                                                              )
+                                                            else
+                                                              Icon(
+                                                                playIcon,
+                                                                color: Colors.white,
+                                                              ),
+                                                            const SizedBox(width: 6),
+                                                            Text(
+                                                              playLabel,
+                                                              style: const TextStyle(
+                                                                color: Colors.white,
+                                                                fontWeight: FontWeight.w600,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      );
+
+                                                      final downloadButton = ElevatedButton(
+                                                        style: ElevatedButton.styleFrom(
+                                                          backgroundColor: Colors.red[600],
+                                                          padding:
+                                                              const EdgeInsets.symmetric(vertical: 10),
+                                                          shape: RoundedRectangleBorder(
+                                                            borderRadius: BorderRadius.circular(8),
+                                                          ),
+                                                        ),
+                                                        onPressed: isDownloaded
+                                                            ? () => showGlobalSnackBarMessage(
+                                                                  'Already downloaded.',
+                                                                )
+                                                            : () async {
+                                                                setState(() {
                                                                   _downloading[video.id] = true;
                                                                 });
                                                                 if (!mounted) return;
-                                                                showGlobalSnackBarMessage('Download started: ${video.title}');
-                                                                      final result = await DownloadService.downloadAudio(
+                                                                showGlobalSnackBarMessage(
+                                                                  'Download started: ${video.title}',
+                                                                );
+                                                                final result =
+                                                                    await DownloadService.downloadAudio(
                                                                   videoId: video.id,
-                                                                  videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
+                                                                  videoUrl:
+                                                                      'https://www.youtube.com/watch?v=${video.id}',
                                                                   title: video.title,
                                                                   channelName: video.channelName,
                                                                   thumbnailUrl: video.thumbnailUrl,
                                                                   onProgress: (_, __) {},
                                                                 );
                                                                 if (!mounted) return;
-                                                                      setState(() {
+                                                                setState(() {
                                                                   _downloading[video.id] = false;
                                                                 });
                                                                 if (!mounted) return;
                                                                 if (result != null) {
-                                                                  showGlobalSnackBarMessage('Download complete: ${video.title}');
-                                                                } else if (!DownloadService.consumeCancelledFlag(video.id)) {
-                                                                  showGlobalSnackBarMessage('Download failed: ${video.title}');
-                                                                      }
-                                                                    }
-                                                                  },
-                                                                ),
+                                                                  showGlobalSnackBarMessage(
+                                                                    'Download complete: ${video.title}',
+                                                                  );
+                                                                } else if (!DownloadService
+                                                                    .consumeCancelledFlag(video.id)) {
+                                                                  showGlobalSnackBarMessage(
+                                                                    'Download failed: ${video.title}',
+                                                                  );
+                                                                }
+                                                              },
+                                                        child: Row(
+                                                          mainAxisAlignment: MainAxisAlignment.center,
+                                                          mainAxisSize: MainAxisSize.min,
+                                                          children: [
+                                                            const Icon(
+                                                              Icons.download,
+                                                              color: Colors.white,
+                                                            ),
+                                                            const SizedBox(width: 6),
+                                                            Text(
+                                                              isDownloaded ? 'Downloaded' : 'Download',
+                                                              style: const TextStyle(
+                                                                color: Colors.white,
+                                                                fontWeight: FontWeight.w600,
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      );
+
+                                                      return Padding(
+                                                        padding: const EdgeInsets.symmetric(
+                                                          horizontal: 8,
+                                                          vertical: 4,
+                                                        ),
+                                                        child: LayoutBuilder(
+                                                          builder: (context, innerConstraints) {
+                                                            final isCompact =
+                                                                innerConstraints.maxWidth < 360;
+                                                            if (isCompact) {
+                                                              return Column(
+                                                                crossAxisAlignment:
+                                                                    CrossAxisAlignment.stretch,
+                                                                children: [
+                                                                  playButton,
+                                                                  const SizedBox(height: 8),
+                                                                  downloadButton,
+                                                                ],
+                                                              );
+                                                            }
+                                                            return Row(
+                                                              children: [
+                                                                Expanded(child: playButton),
+                                                                const SizedBox(width: 8),
+                                                                Expanded(child: downloadButton),
                                                               ],
                                                             );
                                                           },
+                                                        ),
+                                                      );
+                                                          },
                                                         );
-                                                      },
-                                                    ),
+                                                     },
+                                                   ),
                                                   ],
                                                 ),
                                               ),

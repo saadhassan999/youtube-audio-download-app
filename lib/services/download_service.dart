@@ -19,7 +19,44 @@ import 'composite_extractor.dart';
 class PlayingAudio {
   final String videoId;
   final bool isPlaying;
-  PlayingAudio(this.videoId, this.isPlaying);
+  final String? title;
+  final String? channelName;
+  final String? thumbnailUrl;
+  final String? filePath;
+  final String? streamUrl;
+  final bool isLocal;
+
+  const PlayingAudio({
+    required this.videoId,
+    required this.isPlaying,
+    this.title,
+    this.channelName,
+    this.thumbnailUrl,
+    this.filePath,
+    this.streamUrl,
+    this.isLocal = true,
+  });
+
+  PlayingAudio copyWith({
+    bool? isPlaying,
+    String? title,
+    String? channelName,
+    String? thumbnailUrl,
+    String? filePath,
+    String? streamUrl,
+    bool? isLocal,
+  }) {
+    return PlayingAudio(
+      videoId: videoId,
+      isPlaying: isPlaying ?? this.isPlaying,
+      title: title ?? this.title,
+      channelName: channelName ?? this.channelName,
+      thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
+      filePath: filePath ?? this.filePath,
+      streamUrl: streamUrl ?? this.streamUrl,
+      isLocal: isLocal ?? this.isLocal,
+    );
+  }
 }
 
 class DownloadService {
@@ -163,11 +200,11 @@ class DownloadService {
         globalPlayingNotifier.value = null;
       } else if (state.playing) {
         if (current != null) {
-          globalPlayingNotifier.value = PlayingAudio(current.videoId, true);
+          globalPlayingNotifier.value = current.copyWith(isPlaying: true);
         }
       } else {
         if (current != null) {
-          globalPlayingNotifier.value = PlayingAudio(current.videoId, false);
+          globalPlayingNotifier.value = current.copyWith(isPlaying: false);
         }
       }
       // Save state on any player state change
@@ -678,8 +715,13 @@ class DownloadService {
               : Duration.zero,
         );
         globalPlayingNotifier.value = PlayingAudio(
-          video.videoId,
-          lastState == 'playing',
+          videoId: video.videoId,
+          isPlaying: lastState == 'playing',
+          title: video.title,
+          channelName: video.channelName,
+          thumbnailUrl: video.thumbnailUrl,
+          filePath: video.filePath,
+          isLocal: true,
         );
         await _setSessionActive(true);
         if (lastState == 'playing') {
@@ -719,65 +761,121 @@ class DownloadService {
     String? thumbnailUrl,
   }) async {
     ensureInitialized();
-    final currentSource = globalAudioPlayer.audioSource;
-    bool hasMediaItem = false;
-    if (currentSource is ConcatenatingAudioSource &&
-        currentSource.length == 1 &&
-        currentSource.children.first is UriAudioSource &&
-        (currentSource.children.first as UriAudioSource).tag is MediaItem) {
-      final tag =
-          (currentSource.children.first as UriAudioSource).tag as MediaItem;
-      hasMediaItem = tag.id == videoId;
+    final current = globalPlayingNotifier.value;
+    final isSameLocal =
+        current?.videoId == videoId && (current?.isLocal ?? false);
+
+    if (isSameLocal) {
+      if (current?.isPlaying ?? false) {
+        await globalAudioPlayer.pause();
+        globalPlayingNotifier.value = current!.copyWith(isPlaying: false);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setInt(
+          'audio_position_$videoId',
+          globalAudioPlayer.position.inMilliseconds,
+        );
+      } else {
+        await globalAudioPlayer.play();
+        globalPlayingNotifier.value = current!.copyWith(isPlaying: true);
+      }
+      await saveGlobalPlayerState();
+      return;
     }
-    if (!hasMediaItem) {
-      await globalAudioPlayer.setAudioSource(
-        ConcatenatingAudioSource(
-          children: [
-            AudioSource.uri(
-              Uri.file(filePath),
-              tag: MediaItem(
-                id: videoId,
-                album: 'YouTube Audio',
-                title: title ?? 'Audio',
-                artist: channelName ?? '',
-                artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
-                    ? Uri.parse(thumbnailUrl)
-                    : null,
-              ),
+
+    await stopGlobalAudio();
+
+    await globalAudioPlayer.setAudioSource(
+      ConcatenatingAudioSource(
+        children: [
+          AudioSource.uri(
+            Uri.file(filePath),
+            tag: MediaItem(
+              id: videoId,
+              album: 'YouTube Audio',
+              title: title ?? 'Audio',
+              artist: channelName ?? '',
+              artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
+                  ? Uri.parse(thumbnailUrl)
+                  : null,
             ),
-          ],
+          ),
+        ],
+      ),
+      initialIndex: 0,
+      initialPosition: Duration.zero,
+    );
+
+    final playing = PlayingAudio(
+      videoId: videoId,
+      isPlaying: true,
+      title: title,
+      channelName: channelName,
+      thumbnailUrl: thumbnailUrl,
+      filePath: filePath,
+      isLocal: true,
+    );
+    globalPlayingNotifier.value = playing;
+    await _setSessionActive(true);
+    await globalAudioPlayer.play();
+    await saveGlobalPlayerState();
+  }
+
+  static Future<void> playStream({
+    required String videoId,
+    required String videoUrl,
+    String? title,
+    String? channelName,
+    String? thumbnailUrl,
+  }) async {
+    ensureInitialized();
+    final current = globalPlayingNotifier.value;
+    final isSameStream =
+        current?.videoId == videoId && !(current?.isLocal ?? true);
+
+    if (isSameStream) {
+      if (current?.isPlaying ?? false) {
+        await globalAudioPlayer.pause();
+        globalPlayingNotifier.value = current!.copyWith(isPlaying: false);
+      } else {
+        await globalAudioPlayer.play();
+        globalPlayingNotifier.value = current!.copyWith(isPlaying: true);
+      }
+      await saveGlobalPlayerState();
+      return;
+    }
+
+    await stopGlobalAudio();
+
+    final extracted = await _extractor.getBestAudio(videoUrl);
+
+    await globalAudioPlayer.setAudioSource(
+      AudioSource.uri(
+        Uri.parse(extracted.url),
+        tag: MediaItem(
+          id: videoId,
+          album: 'YouTube Audio',
+          title: title ?? 'Audio',
+          artist: channelName ?? '',
+          artUri:
+              thumbnailUrl != null && thumbnailUrl.isNotEmpty ? Uri.parse(thumbnailUrl) : null,
         ),
-        initialIndex: 0,
-        initialPosition: Duration.zero,
-      );
-      globalPlayingNotifier.value = PlayingAudio(
-        videoId,
-        false,
-      ); // Set immediately after source
-    }
-    if (globalPlayingNotifier.value?.videoId == videoId &&
-        (globalPlayingNotifier.value?.isPlaying ?? false)) {
-      await globalAudioPlayer.pause();
-      globalPlayingNotifier.value = PlayingAudio(videoId, false);
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt(
-        'audio_position_$videoId',
-        globalAudioPlayer.position.inMilliseconds,
-      );
-      await saveGlobalPlayerState();
-    } else if (globalPlayingNotifier.value?.videoId == videoId &&
-        !(globalPlayingNotifier.value?.isPlaying ?? false)) {
-      globalPlayingNotifier.value = PlayingAudio(videoId, true);
-      await _setSessionActive(true);
-      await globalAudioPlayer.play();
-      await saveGlobalPlayerState();
-    } else {
-      await stopGlobalAudio();
-      globalPlayingNotifier.value = PlayingAudio(videoId, true);
-      await _setSessionActive(true);
-      await globalAudioPlayer.play();
-      await saveGlobalPlayerState();
-    }
+      ),
+    );
+
+    final playing = PlayingAudio(
+      videoId: videoId,
+      isPlaying: true,
+      title: title,
+      channelName: channelName,
+      thumbnailUrl: thumbnailUrl,
+      streamUrl: extracted.url,
+      isLocal: false,
+    );
+
+    globalPlayingNotifier.value = playing;
+    await _setSessionActive(true);
+    await globalAudioPlayer.play();
+    await saveGlobalPlayerState();
   }
 
   static Future<void> _updateIsAnyDownloadInProgress() async {

@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import '../services/download_service.dart';
-import '../services/database_service.dart';
-import '../models/downloaded_video.dart';
 import 'audio_player_bottom_sheet.dart';
 import 'dart:io';
 import '../core/snackbar_bus.dart';
@@ -14,8 +12,7 @@ class MiniPlayer extends StatefulWidget {
 }
 
 class _MiniPlayerState extends State<MiniPlayer> {
-  DownloadedVideo? _currentVideo;
-  bool _isPlaying = false;
+  PlayingAudio? _current;
 
   @override
   void initState() {
@@ -32,60 +29,45 @@ class _MiniPlayerState extends State<MiniPlayer> {
     super.dispose();
   }
 
-  Future<void> _updatePlayerState() async {
-    final playing = DownloadService.globalPlayingNotifier.value;
+  void _updatePlayerState() {
     if (!mounted) return;
-
-    if (playing == null) {
-      if (_currentVideo != null || _isPlaying) {
-        setState(() {
-          _currentVideo = null;
-          _isPlaying = false;
-        });
-      }
-      return;
-    }
-
-    final targetVideoId = playing.videoId;
-    DownloadedVideo? video = _currentVideo;
-
-    if (video == null || video.videoId != targetVideoId) {
-      final fetchedVideo =
-          await DatabaseService.instance.getDownloadedVideo(targetVideoId);
-      if (!mounted) return;
-
-      final latest = DownloadService.globalPlayingNotifier.value;
-      if (latest == null || latest.videoId != targetVideoId) {
-        // State changed while fetching; a new update will follow.
-        return;
-      }
-      video = fetchedVideo;
-    }
-
-    if (!mounted) return;
-
     setState(() {
-      _currentVideo = video;
-      _isPlaying = playing.isPlaying;
+      _current = DownloadService.globalPlayingNotifier.value;
     });
   }
 
   void _playPause() async {
-    if (_currentVideo == null) return;
+    final playing = _current;
+    if (playing == null) return;
 
-    final file = File(_currentVideo!.filePath);
-    if (!await file.exists()) {
-      showGlobalSnackBarMessage('Audio file not found');
-      return;
+    if (playing.isLocal) {
+      final filePath = playing.filePath;
+      if (filePath == null) {
+        showGlobalSnackBarMessage('Audio file not found');
+        return;
+      }
+      final file = File(filePath);
+      if (!await file.exists()) {
+        showGlobalSnackBarMessage('Audio file not found');
+        return;
+      }
+
+      await DownloadService.playOrPause(
+        playing.videoId,
+        filePath,
+        title: playing.title,
+        channelName: playing.channelName,
+        thumbnailUrl: playing.thumbnailUrl,
+      );
+    } else {
+      await DownloadService.playStream(
+        videoId: playing.videoId,
+        videoUrl: 'https://www.youtube.com/watch?v=${playing.videoId}',
+        title: playing.title,
+        channelName: playing.channelName,
+        thumbnailUrl: playing.thumbnailUrl,
+      );
     }
-
-    await DownloadService.playOrPause(
-      _currentVideo!.videoId,
-      _currentVideo!.filePath,
-      title: _currentVideo!.title,
-      channelName: _currentVideo!.channelName,
-      thumbnailUrl: _currentVideo!.thumbnailUrl,
-    );
   }
 
   void _showFullPlayer() {
@@ -96,17 +78,21 @@ class _MiniPlayerState extends State<MiniPlayer> {
     await DownloadService.clearPlaybackSession();
     if (!mounted) return;
     setState(() {
-      _currentVideo = null;
-      _isPlaying = false;
+      _current = null;
     });
   }
 
   @override
   Widget build(BuildContext context) {
     // Don't show if nothing is playing
-    if (_currentVideo == null) {
+    final playing = _current;
+    if (playing == null) {
       return const SizedBox.shrink();
     }
+
+    final thumbnailUrl = playing.thumbnailUrl ?? '';
+    final title = playing.title ?? 'Now playing';
+    final channelName = playing.channelName ?? '';
 
     return SafeArea(
       top: false,
@@ -131,9 +117,9 @@ class _MiniPlayerState extends State<MiniPlayer> {
                 onTap: _showFullPlayer,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: _currentVideo!.thumbnailUrl.isNotEmpty
+                  child: thumbnailUrl.isNotEmpty
                       ? Image.network(
-                          _currentVideo!.thumbnailUrl,
+                          thumbnailUrl,
                           width: 48,
                           height: 48,
                           fit: BoxFit.cover,
@@ -171,7 +157,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        _currentVideo!.title,
+                        title,
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 13,
@@ -181,7 +167,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                       ),
                       SizedBox(height: 2),
                       Text(
-                        _currentVideo!.channelName,
+                        channelName,
                         style: TextStyle(color: Colors.grey[600], fontSize: 11),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -197,7 +183,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                   IconButton(
                     onPressed: _playPause,
                     icon: Icon(
-                      _isPlaying ? Icons.pause : Icons.play_arrow,
+                      playing.isPlaying ? Icons.pause : Icons.play_arrow,
                       size: 22,
                     ),
                     color: Theme.of(context).primaryColor,
