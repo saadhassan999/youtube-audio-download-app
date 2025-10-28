@@ -420,10 +420,19 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                 ),
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-                    child: _SearchBarContainer(
-                      onChannelSelected: _onChannelSelected,
-                      onManualAdd: _addChannel,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _SearchBarContainer(
+                            onChannelSelected: _onChannelSelected,
+                            onManualAdd: _addChannel,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -751,15 +760,18 @@ class _SearchBarContainer extends StatelessWidget {
   Widget build(BuildContext context) {
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 64),
-      child: Material(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        elevation: 0,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          child: ChannelSearchField(
-            onChannelSelected: onChannelSelected,
-            onManualAdd: onManualAdd,
+      child: SizedBox(
+        width: double.infinity,
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          elevation: 0,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: ChannelSearchField(
+              onChannelSelected: onChannelSelected,
+              onManualAdd: onManualAdd,
+            ),
           ),
         ),
       ),

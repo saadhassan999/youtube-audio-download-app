@@ -396,21 +396,17 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
     final fieldWidth =
         fieldSize.width > 0 ? fieldSize.width : mediaQuery.size.width;
 
-    const horizontalGutter = 16.0;
     final screenWidth = mediaQuery.size.width;
     final screenHeight = mediaQuery.size.height;
 
-    final maxDropdownWidth = screenWidth - (horizontalGutter * 2);
-    final minDropdownWidth = math.min(240.0, maxDropdownWidth);
-    final maxWidthForClamp = math.max(240.0, maxDropdownWidth);
-    final dropdownWidth = fieldWidth
-        .clamp(minDropdownWidth, maxWidthForClamp)
-        .toDouble();
-
-    final minLeft = horizontalGutter;
-    final maxLeft = math.max(minLeft, screenWidth - dropdownWidth - horizontalGutter);
+    double dropdownWidth = fieldWidth;
     double left = fieldOrigin.dx;
-    left = left.clamp(minLeft, maxLeft).toDouble();
+
+    if (dropdownWidth <= 0) {
+      const fallbackPadding = 16.0;
+      dropdownWidth = screenWidth - (fallbackPadding * 2);
+      left = fallbackPadding;
+    }
 
     final desiredTop = fieldOrigin.dy + fieldHeight + 8.0;
     final maxTop = math.max(
@@ -470,17 +466,17 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
       link: _layerLink,
       child: KeyedSubtree(
         key: _targetKey,
-        child: Padding(
-          padding: const EdgeInsets.all(8.0),
-        child: TextField(
-          controller: _controller,
-          focusNode: _focusNode,
-          style: const TextStyle(color: Colors.black87),
-          decoration: InputDecoration(
-            labelText: 'Search for YouTube channels...',
-            hintText: 'Type channel name (e.g., "PewDiePie", "MrBeast")',
-            prefixIcon: Icon(Icons.search),
-            suffixIcon: _isLoading
+        child: SizedBox(
+          width: double.infinity,
+          child: TextField(
+            controller: _controller,
+            focusNode: _focusNode,
+            style: const TextStyle(color: Colors.black87),
+            decoration: InputDecoration(
+              labelText: 'Search for YouTube channels...',
+              hintText: 'Type channel name (e.g., "PewDiePie", "MrBeast")',
+              prefixIcon: Icon(Icons.search),
+              suffixIcon: _isLoading
                   ? Padding(
                       padding: EdgeInsets.all(12),
                       child: SizedBox(
@@ -488,26 +484,26 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
-                  )
-                : null,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
+                    )
+                  : null,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: Colors.black26),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(color: Colors.black12),
+              ),
+              filled: true,
+              fillColor: Colors.white,
             ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Colors.black26),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Colors.black12),
-            ),
-            filled: true,
-            fillColor: Colors.white,
+            onChanged: _onTextChanged,
+            onSubmitted: (_) => _onManualAdd(),
           ),
-          onChanged: _onTextChanged,
-          onSubmitted: (_) => _onManualAdd(),
         ),
-      ),
       ),
     );
   }
