@@ -3,9 +3,12 @@ import 'package:flutter/material.dart';
 import '../core/fetch_exception.dart';
 import '../models/channel.dart';
 import '../models/video.dart';
+import '../models/saved_video.dart';
 import '../models/downloaded_video.dart';
 import '../repositories/channel_repository.dart';
+import '../repositories/video_repository.dart';
 import '../services/database_service.dart';
+import '../services/download_service.dart';
 import '../utils/youtube_utils.dart';
 import '../widgets/channel_search_field.dart';
 import '../widgets/mini_player.dart';
@@ -28,11 +31,13 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   final Map<String, _ChannelSectionState> _channelStates = {};
   final Map<String, Future<void>> _channelRefreshes = {};
   List<Channel> _channels = [];
+  List<SavedVideo> _savedVideos = [];
   bool _isRefreshingAll = false;
   bool _isOnline = true;
   late AnimationController _logoController;
   final _scroll = ScrollController();
   StreamSubscription<dynamic>? _connectivitySub;
+  StreamSubscription<List<SavedVideo>>? _savedVideosSub;
 
   void _openDownloads() {
     Navigator.push(
@@ -88,11 +93,20 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     );
     _initConnectivity();
     _loadChannels();
+    _savedVideosSub = VideoRepository.instance
+        .watchSavedVideos()
+        .listen((videos) {
+      if (!mounted) return;
+      setState(() {
+        _savedVideos = videos;
+      });
+    });
   }
 
   @override
   void dispose() {
     _connectivitySub?.cancel();
+    _savedVideosSub?.cancel();
     _logoController.dispose();
     _scroll.dispose();
     super.dispose();
@@ -287,6 +301,39 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     });
   }
 
+  List<Widget> _buildSavedVideosSlivers() {
+    if (_savedVideos.isEmpty) {
+      return const [];
+    }
+    return [
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Text(
+            'Saved Videos',
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
+      SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final saved = _savedVideos[index];
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: SavedVideoTile(savedVideo: saved),
+            );
+          },
+          childCount: _savedVideos.length,
+        ),
+      ),
+      const SliverToBoxAdapter(child: SizedBox(height: 16)),
+    ];
+  }
+
   Widget _buildInlineActionButton({
     required String label,
     required bool isBusy,
@@ -446,6 +493,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                       child: _buildOfflineBanner(),
                     ),
                   ),
+                ..._buildSavedVideosSlivers(),
                 if (_channels.isEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
@@ -776,6 +824,403 @@ class _SearchBarContainer extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class SavedVideoTile extends StatefulWidget {
+  const SavedVideoTile({super.key, required this.savedVideo});
+
+  final SavedVideo savedVideo;
+
+  @override
+  State<SavedVideoTile> createState() => _SavedVideoTileState();
+}
+
+class _SavedVideoTileState extends State<SavedVideoTile> {
+  bool _isStreaming = false;
+  bool _isDownloading = false;
+  bool _isRemoving = false;
+  late final VoidCallback _playingListener;
+
+  @override
+  void initState() {
+    super.initState();
+    _playingListener = _handlePlayingUpdate;
+    DownloadService.globalPlayingNotifier.addListener(_playingListener);
+  }
+
+  @override
+  void dispose() {
+    DownloadService.globalPlayingNotifier.removeListener(_playingListener);
+    super.dispose();
+  }
+
+  void _handlePlayingUpdate() {
+    final playing = DownloadService.globalPlayingNotifier.value;
+    if (!mounted) return;
+    if (playing?.videoId != widget.savedVideo.videoId) {
+      return;
+    }
+    setState(() {
+      _isStreaming = false;
+    });
+  }
+
+  Video get _video => Video(
+        id: widget.savedVideo.videoId,
+        title: widget.savedVideo.title,
+        published: widget.savedVideo.publishedAt?.toUtc() ?? DateTime.now().toUtc(),
+        thumbnailUrl: widget.savedVideo.thumbnailUrl,
+        channelName: widget.savedVideo.channelTitle,
+        channelId: widget.savedVideo.channelId,
+        duration: widget.savedVideo.duration,
+      );
+
+  bool get _isDownloaded => widget.savedVideo.status == 'downloaded';
+  bool get _isDownloadingStatus => widget.savedVideo.status == 'downloading';
+  bool get _hasError => widget.savedVideo.status == 'error';
+
+  @override
+  Widget build(BuildContext context) {
+    final saved = widget.savedVideo;
+    final durationText = _formatDuration(saved.duration);
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildThumbnail(saved.thumbnailUrl, saved.duration),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        saved.title,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        saved.channelTitle,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      if (durationText != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            durationText,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey,
+                            ),
+                          ),
+                        ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 4,
+                        children: [
+                          _buildStatusChip(
+                            context,
+                            _statusLabel(saved.status),
+                            saved.status,
+                          ),
+                          if (_hasError)
+                            const Text(
+                              'Tap download to try again',
+                              style: TextStyle(fontSize: 12, color: Colors.red),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                _buildRemoveButton(),
+              ],
+            ),
+            if (_isDownloadingStatus)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: _buildProgressBar(),
+              ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _handlePlay,
+                    icon: _isStreaming
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_arrow),
+                    label: const Text('Play'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: (_isDownloadingStatus || _isDownloading)
+                        ? null
+                        : () async {
+                            if (_isDownloadingStatus) return;
+                            setState(() => _isDownloading = true);
+                            try {
+                              await downloadVideo(
+                                context,
+                                _video,
+                                trackSavedVideo: true,
+                              );
+                            } finally {
+                              if (mounted) {
+                                setState(() => _isDownloading = false);
+                              }
+                            }
+                          },
+                    icon: (_isDownloading || _isDownloadingStatus)
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.download),
+                    label: Text(_isDownloaded ? 'Re-download' : 'Download'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handlePlay() async {
+    final localPath = await DownloadService.getDownloadedFilePath(
+      widget.savedVideo.videoId,
+    );
+    if (localPath == null) {
+      final current = DownloadService.globalPlayingNotifier.value;
+      final shouldShowSpinner =
+          !(current?.videoId == widget.savedVideo.videoId &&
+              !(current?.isLocal ?? true));
+      if (shouldShowSpinner && mounted) {
+        setState(() => _isStreaming = true);
+      }
+      await playVideo(context, _video);
+      if (!mounted) return;
+      if (shouldShowSpinner) {
+        setState(() => _isStreaming = false);
+      }
+      return;
+    }
+
+    await playVideo(context, _video);
+  }
+
+  Widget _buildRemoveButton() {
+    if (_isRemoving) {
+      return const SizedBox(
+        width: 24,
+        height: 24,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    return IconButton(
+      tooltip: 'Remove saved video',
+      onPressed: _removeSavedVideo,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minHeight: 32, minWidth: 32),
+      icon: const Icon(Icons.close),
+    );
+  }
+
+  Future<void> _removeSavedVideo() async {
+    if (_isRemoving) return;
+    setState(() => _isRemoving = true);
+    try {
+      if (_isDownloadingStatus) {
+        await DownloadService.cancelDownload(widget.savedVideo.videoId);
+      }
+      await VideoRepository.instance.removeSavedVideo(widget.savedVideo.videoId);
+      showGlobalSnackBarMessage('Removed saved video');
+    } catch (e) {
+      showGlobalSnackBar(
+        SnackBar(content: Text('Failed to remove video: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isRemoving = false);
+      }
+    }
+  }
+
+  Widget _buildThumbnail(String url, Duration? duration) {
+    final durationText = duration != null ? _formatDuration(duration) : null;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: SizedBox(
+        width: 120,
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (url.isNotEmpty)
+                Image.network(
+                  url,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => Container(
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.videocam, color: Colors.grey),
+                  ),
+                )
+              else
+                Container(
+                  color: Colors.grey[300],
+                  child: const Icon(Icons.videocam, color: Colors.grey),
+                ),
+              if (durationText != null)
+                Positioned(
+                  right: 4,
+                  bottom: 4,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      durationText,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProgressBar() {
+    final total = widget.savedVideo.bytesTotal;
+    final downloaded = widget.savedVideo.bytesDownloaded ?? 0;
+    final progress = (total != null && total > 0)
+        ? (downloaded / total).clamp(0.0, 1.0)
+        : null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        LinearProgressIndicator(value: progress),
+        const SizedBox(height: 4),
+        Text(
+          total != null
+              ? '${_formatBytes(downloaded)} / ${_formatBytes(total)}'
+              : 'Preparing download...',
+          style: const TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatusChip(BuildContext context, String label, String status) {
+    Color background;
+    Color foreground;
+    switch (status) {
+      case 'downloaded':
+        background = Colors.green.shade50;
+        foreground = Colors.green.shade700;
+        break;
+      case 'downloading':
+        background = Colors.blue.shade50;
+        foreground = Colors.blue.shade700;
+        break;
+      case 'error':
+        background = Colors.red.shade50;
+        foreground = Colors.red.shade700;
+        break;
+      default:
+        background = Colors.grey.shade200;
+        foreground = Colors.grey.shade700;
+        break;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: foreground,
+        ),
+      ),
+    );
+  }
+
+  String? _formatDuration(Duration? duration) {
+    if (duration == null) return null;
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    final mm = minutes.toString().padLeft(hours > 0 ? 2 : 1, '0');
+    final ss = seconds.toString().padLeft(2, '0');
+    if (hours > 0) {
+      return '$hours:$mm:$ss';
+    }
+    return '$mm:$ss';
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'downloaded':
+        return 'Downloaded';
+      case 'downloading':
+        return 'Downloading';
+      case 'error':
+        return 'Error';
+      default:
+        return 'Saved';
+    }
+  }
+
+  String _formatBytes(int value) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    double size = value.toDouble();
+    int unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit++;
+    }
+    return '${size.toStringAsFixed(unit == 0 ? 0 : 1)} ${units[unit]}';
   }
 }
 

@@ -14,18 +14,44 @@ List<Video> parseRssFeed(String xmlString) {
     final published = entry.findElements('published').isNotEmpty
         ? DateTime.parse(entry.findElements('published').first.text)
         : DateTime.now();
-    final thumbnailUrl = entry.findElements('media:group').isNotEmpty
-        ? entry.findElements('media:group').first.findElements('media:thumbnail').first.getAttribute('url') ?? ''
+    final mediaGroup = entry.findElements('media:group').isNotEmpty
+        ? entry.findElements('media:group').first
+        : null;
+    final thumbnailUrl = mediaGroup != null &&
+            mediaGroup.findElements('media:thumbnail').isNotEmpty
+        ? mediaGroup
+                .findElements('media:thumbnail')
+                .first
+                .getAttribute('url') ??
+            ''
         : '';
     final channelName = entry.findElements('author').isNotEmpty
         ? entry.findElements('author').first.findElements('name').first.text
         : '';
+    final channelId = entry.findElements('yt:channelId').isNotEmpty
+        ? entry.findElements('yt:channelId').first.text
+        : null;
+    Duration? duration;
+    if (mediaGroup != null) {
+      final durationElement = mediaGroup.findElements('yt:duration').isNotEmpty
+          ? mediaGroup.findElements('yt:duration').first
+          : null;
+      final seconds = durationElement?.getAttribute('seconds');
+      if (seconds != null) {
+        final value = int.tryParse(seconds);
+        if (value != null) {
+          duration = Duration(seconds: value);
+        }
+      }
+    }
     return Video(
       id: id,
       title: title,
       published: published,
       thumbnailUrl: thumbnailUrl,
       channelName: channelName,
+      channelId: channelId,
+      duration: duration,
     );
   }).toList();
-} 
+}

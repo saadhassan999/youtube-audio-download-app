@@ -8,6 +8,69 @@ import '../models/video.dart';
 import '../services/database_service.dart';
 import '../services/download_service.dart';
 
+Future<void> playVideo(BuildContext context, Video video) async {
+  final filePath = await DownloadService.getDownloadedFilePath(video.id);
+  if (filePath != null) {
+    final file = File(filePath);
+    if (!await file.exists()) {
+      showGlobalSnackBarMessage('Audio file not found: $filePath');
+      DownloadService.downloadedVideosChanged.value++;
+      return;
+    }
+    await DownloadService.playOrPause(
+      video.id,
+      filePath,
+      title: video.title,
+      channelName: video.channelName,
+      thumbnailUrl: video.thumbnailUrl,
+    );
+    return;
+  }
+
+  try {
+    await DownloadService.playStream(
+      videoId: video.id,
+      videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
+      title: video.title,
+      channelName: video.channelName,
+      thumbnailUrl: video.thumbnailUrl,
+    );
+  } catch (e) {
+    showGlobalSnackBar(
+      SnackBar(content: Text('Failed to play audio: $e')),
+    );
+  }
+}
+
+Future<void> downloadVideo(
+  BuildContext context,
+  Video video, {
+  bool trackSavedVideo = false,
+}) async {
+  showGlobalSnackBarMessage('Download started: ${video.title}');
+  try {
+    final result = await DownloadService.downloadVideo(
+      video,
+      trackSavedVideo: trackSavedVideo,
+    );
+    bool cancelled = false;
+    if (!trackSavedVideo) {
+      cancelled = DownloadService.consumeCancelledFlag(video.id);
+    }
+    if (result != null) {
+      showGlobalSnackBarMessage('Download complete: ${video.title}');
+    } else if (cancelled) {
+      showGlobalSnackBarMessage('Download cancelled: ${video.title}');
+    } else {
+      showGlobalSnackBarMessage('Download failed: ${video.title}');
+    }
+  } catch (e) {
+    showGlobalSnackBar(
+      SnackBar(content: Text('Download failed: $e')),
+    );
+  }
+}
+
 class ChannelVideoTile extends StatefulWidget {
   const ChannelVideoTile({super.key, required this.video});
 
@@ -76,54 +139,30 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
 
   Future<void> _handlePlay() async {
     final video = widget.video;
-    final filePath = await DownloadService.getDownloadedFilePath(video.id);
-    if (filePath != null) {
-      final file = File(filePath);
-      if (!await file.exists()) {
-        showGlobalSnackBarMessage('Audio file not found: $filePath');
-        await _refreshDownloadedVideo();
-        return;
+    final localPath = await DownloadService.getDownloadedFilePath(video.id);
+    if (localPath == null) {
+      final current = DownloadService.globalPlayingNotifier.value;
+      final shouldShowSpinner =
+          !(current?.videoId == video.id && !(current?.isLocal ?? true));
+
+      if (shouldShowSpinner && mounted) {
+        setState(() {
+          _isStreaming = true;
+        });
       }
-      await DownloadService.playOrPause(
-        video.id,
-        filePath,
-        title: video.title,
-        channelName: video.channelName,
-        thumbnailUrl: video.thumbnailUrl,
-      );
-      return;
-    }
 
-    final current = DownloadService.globalPlayingNotifier.value;
-    final shouldShowSpinner =
-        !(current?.videoId == video.id && !(current?.isLocal ?? true));
+      await playVideo(context, video);
 
-    if (shouldShowSpinner && mounted) {
-      setState(() {
-        _isStreaming = true;
-      });
-    }
-
-    try {
-      await DownloadService.playStream(
-        videoId: video.id,
-        videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
-        title: video.title,
-        channelName: video.channelName,
-        thumbnailUrl: video.thumbnailUrl,
-      );
-    } catch (e) {
-      if (mounted) {
-        showGlobalSnackBar(SnackBar(content: Text('Failed to play audio: $e')));
-      }
-    } finally {
       if (!mounted) return;
       if (shouldShowSpinner) {
         setState(() {
           _isStreaming = false;
         });
       }
+      return;
     }
+
+    await playVideo(context, video);
   }
 
   Future<void> _startDownload() async {
@@ -133,23 +172,8 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
       _isManualDownloading = true;
     });
 
-    showGlobalSnackBarMessage('Download started: ${video.title}');
-    DownloadedVideo? result;
-    var encounteredError = false;
     try {
-      result = await DownloadService.downloadAudio(
-        videoId: video.id,
-        videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
-        title: video.title,
-        channelName: video.channelName,
-        thumbnailUrl: video.thumbnailUrl,
-        onProgress: (_, __) {},
-      );
-    } catch (e) {
-      encounteredError = true;
-      if (mounted) {
-        showGlobalSnackBar(SnackBar(content: Text('Download failed: $e')));
-      }
+      await downloadVideo(context, video);
     } finally {
       if (mounted) {
         setState(() {
@@ -159,14 +183,6 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
     }
 
     await _refreshDownloadedVideo();
-    if (!mounted) return;
-
-    if (result != null) {
-      showGlobalSnackBarMessage('Download complete: ${video.title}');
-    } else if (!encounteredError &&
-        !DownloadService.consumeCancelledFlag(video.id)) {
-      showGlobalSnackBarMessage('Download failed: ${video.title}');
-    }
   }
 
   Future<void> _cancelDownload() async {

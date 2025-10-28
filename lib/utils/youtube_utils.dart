@@ -112,3 +112,54 @@ String _formatWithSuffix(int count, int divisor, String suffix) {
   final trimmed = formatted.replaceFirst(RegExp(r'\.?0+$'), '');
   return '$trimmed$suffix';
 }
+
+final RegExp _videoIdPattern = RegExp(r'^[a-zA-Z0-9_-]{11}$');
+
+String? tryParseVideoId(String input) {
+  final trimmed = input.trim();
+  if (trimmed.isEmpty) return null;
+
+  if (_videoIdPattern.hasMatch(trimmed)) {
+    return trimmed;
+  }
+
+  final maybeUri = Uri.tryParse(trimmed);
+  if (maybeUri != null && maybeUri.host.isNotEmpty) {
+    final host = maybeUri.host.toLowerCase();
+    final segments = maybeUri.pathSegments;
+
+    if (host.contains('youtu.be') && segments.isNotEmpty) {
+      final candidate = segments.first;
+      if (_videoIdPattern.hasMatch(candidate)) {
+        return candidate;
+      }
+    }
+
+    if (host.contains('youtube.com')) {
+      final queryId = maybeUri.queryParameters['v'];
+      if (queryId != null && _videoIdPattern.hasMatch(queryId)) {
+        return queryId;
+      }
+
+      if (segments.length >= 2) {
+        final type = segments.first;
+        final candidate = segments[1];
+        if ((type == 'embed' || type == 'shorts' || type == 'live') &&
+            _videoIdPattern.hasMatch(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  final embeddedMatch =
+      RegExp(r'(?<![a-zA-Z0-9_-])([a-zA-Z0-9_-]{11})(?![a-zA-Z0-9_-])')
+          .firstMatch(trimmed);
+  if (embeddedMatch != null) {
+    return embeddedMatch.group(1);
+  }
+
+  return null;
+}
+
+bool looksLikeVideoUrlOrId(String input) => tryParseVideoId(input) != null;

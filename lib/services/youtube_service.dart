@@ -10,10 +10,13 @@ import '../core/fetch_exception.dart';
 import '../models/channel.dart';
 import '../models/video.dart';
 import '../utils/rss_parser.dart';
+import '../utils/youtube_utils.dart';
 
 class YouTubeService {
   static const _maxCacheEntries = 20;
   static final LinkedHashMap<String, List<Channel>> _suggestionCache =
+      LinkedHashMap();
+  static final LinkedHashMap<String, List<Video>> _videoSuggestionCache =
       LinkedHashMap();
   static DateTime? _rateLimitPauseUntil;
   static http.Client? _activeSearchClient;
@@ -127,6 +130,118 @@ class YouTubeService {
       );
     } finally {
       _clearActiveClient(client);
+    }
+  }
+
+  static Future<List<Video>> getVideoSuggestions(
+    String query, {
+    int maxResults = 10,
+  }) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) {
+      return [];
+    }
+
+    final cacheKey = '${trimmed.toLowerCase()}::$maxResults';
+
+    final directId = tryParseVideoId(trimmed);
+    if (directId != null) {
+      final video = await getVideoById(directId);
+      if (video != null) {
+        _writeVideoCache(cacheKey, [video]);
+        return [video];
+      }
+    }
+    final cached = _videoSuggestionCache[cacheKey];
+    if (cached != null) {
+      _videoSuggestionCache.remove(cacheKey);
+      _videoSuggestionCache[cacheKey] = cached;
+      return cached;
+    }
+
+    _ensureNotRateLimited();
+
+    List<Video> results = [];
+
+    if (_hasApiKey) {
+      final client = http.Client();
+      _setActiveSearchClient(client);
+      try {
+        results = await _searchVideosWithApi(
+          client,
+          trimmed,
+          maxResults: maxResults,
+        );
+      } on RateLimitException {
+        rethrow;
+      } on ChannelSearchException catch (e) {
+        throw VideoSearchException(e.message, cause: e.cause);
+      } catch (e) {
+        throw VideoSearchException(
+          'Unable to reach YouTube right now. Please try again.',
+          cause: e,
+        );
+      } finally {
+        _clearActiveClient(client);
+      }
+    }
+
+    if (results.isEmpty) {
+      results = await _searchVideosWithYoutubeExplode(
+        trimmed,
+        maxResults: maxResults,
+      );
+    }
+
+    _writeVideoCache(cacheKey, results);
+    return results;
+  }
+
+  static Future<Video?> getVideoById(String videoId) async {
+    final trimmed = videoId.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    _ensureNotRateLimited();
+
+    if (_hasApiKey) {
+      final client = http.Client();
+      try {
+        final details = await _fetchVideoDetails(client, [trimmed]);
+        return details[trimmed];
+      } on RateLimitException {
+        rethrow;
+      } on ChannelSearchException catch (e) {
+        throw VideoSearchException(e.message, cause: e.cause);
+      } catch (_) {
+        // Fall through to youtube_explode fallback.
+      } finally {
+        client.close();
+      }
+    }
+
+    try {
+      final ytExplode = yt.YoutubeExplode();
+      try {
+        final meta = await ytExplode.videos.get(trimmed);
+        final published = meta.publishDate?.toUtc() ??
+            meta.uploadDate?.toUtc() ??
+            DateTime.now().toUtc();
+        return Video(
+          id: meta.id.value,
+          title: meta.title,
+          published: published.toUtc(),
+          thumbnailUrl: meta.thumbnails.highResUrl,
+          channelName: meta.author,
+          channelId: meta.channelId.value,
+          duration: meta.duration,
+        );
+      } finally {
+        ytExplode.close();
+      }
+    } catch (_) {
+      return null;
     }
   }
 
@@ -312,6 +427,176 @@ class YouTubeService {
     }
   }
 
+  static Future<List<Video>> _searchVideosWithApi(
+    http.Client client,
+    String query, {
+    int maxResults = 10,
+  }) async {
+    final searchUrl = Uri.https('www.googleapis.com', '/youtube/v3/search', {
+      'part': 'snippet',
+      'q': query,
+      'type': 'video',
+      'maxResults': maxResults.toString(),
+      'key': _apiKey,
+      'fields':
+          'items(id/videoId)',
+    });
+
+    final searchResponse = await client.get(searchUrl);
+    if (searchResponse.statusCode != 200) {
+      try {
+        _handleApiError(searchResponse);
+      } on RateLimitException {
+        rethrow;
+      } on ChannelSearchException catch (e) {
+        throw VideoSearchException(e.message, cause: e.cause);
+      }
+    }
+
+    final searchData = json.decode(searchResponse.body) as Map<String, dynamic>;
+    final items = (searchData['items'] as List<dynamic>? ?? [])
+        .cast<Map<String, dynamic>>();
+    if (items.isEmpty) {
+      return [];
+    }
+
+    final ids = <String>[];
+    for (final item in items) {
+      final id = item['id'] as Map<String, dynamic>?;
+      final videoId = id?['videoId'] as String?;
+      if (videoId != null) {
+        ids.add(videoId);
+      }
+    }
+
+    if (ids.isEmpty) {
+      return [];
+    }
+
+    final detailMap = await _fetchVideoDetails(client, ids);
+    final videos = <Video>[];
+    for (final id in ids) {
+      final video = detailMap[id];
+      if (video != null) {
+        videos.add(video);
+      }
+    }
+    return videos;
+  }
+
+  static Future<Map<String, Video>> _fetchVideoDetails(
+    http.Client client,
+    List<String> ids,
+  ) async {
+    if (ids.isEmpty) {
+      return {};
+    }
+
+    final detailsUrl = Uri.https('www.googleapis.com', '/youtube/v3/videos', {
+      'part': 'snippet,contentDetails',
+      'id': ids.join(','),
+      'maxResults': ids.length.toString(),
+      'key': _apiKey,
+      'fields':
+          'items(id,snippet(title,channelTitle,channelId,publishedAt,thumbnails),contentDetails(duration))',
+    });
+
+    final response = await client.get(detailsUrl);
+    if (response.statusCode != 200) {
+      try {
+        _handleApiError(response);
+      } on RateLimitException {
+        rethrow;
+      } on ChannelSearchException catch (e) {
+        throw VideoSearchException(e.message, cause: e.cause);
+      }
+    }
+
+    final data = json.decode(response.body) as Map<String, dynamic>;
+    final items = (data['items'] as List<dynamic>? ?? [])
+        .cast<Map<String, dynamic>>();
+    final result = <String, Video>{};
+
+    for (final item in items) {
+      final id = item['id'] as String?;
+      if (id == null) {
+        continue;
+      }
+      final snippet = item['snippet'] as Map<String, dynamic>? ?? const {};
+      final content =
+          item['contentDetails'] as Map<String, dynamic>? ?? const {};
+
+      final thumbnails =
+          snippet['thumbnails'] as Map<String, dynamic>? ?? const {};
+      final rawPublished = snippet['publishedAt'] as String?;
+      DateTime published;
+      if (rawPublished != null) {
+        try {
+          published = DateTime.parse(rawPublished).toUtc();
+        } catch (_) {
+          published = DateTime.now().toUtc();
+        }
+      } else {
+        published = DateTime.now().toUtc();
+      }
+
+      final rawDuration = content['duration'] as String? ?? '';
+      final duration = _parseIso8601Duration(rawDuration);
+
+      result[id] = Video(
+        id: id,
+        title: snippet['title'] as String? ?? '',
+        published: published,
+        thumbnailUrl: _selectThumbnailUrl(thumbnails),
+        channelName: snippet['channelTitle'] as String? ?? '',
+        channelId: snippet['channelId'] as String? ?? '',
+        duration: duration,
+      );
+    }
+
+    return result;
+  }
+
+  static Future<List<Video>> _searchVideosWithYoutubeExplode(
+    String query, {
+    int maxResults = 10,
+  }) async {
+    final ytExplode = yt.YoutubeExplode();
+    try {
+      final searchList = await ytExplode.search.searchContent(
+        query,
+        filter: yt.TypeFilters.video,
+      );
+
+      final results = <Video>[];
+      for (final item in searchList.whereType<yt.SearchVideo>()) {
+        final duration = _parseColonDuration(item.duration);
+        final thumbnail =
+            item.thumbnails.isNotEmpty ? item.thumbnails.first.url.toString() : '';
+        results.add(
+          Video(
+            id: item.id.value,
+            title: item.title,
+            published: DateTime.now().toUtc(),
+            thumbnailUrl: thumbnail,
+            channelName: item.author,
+            channelId: item.channelId,
+            duration: duration,
+          ),
+        );
+        if (results.length >= maxResults) {
+          break;
+        }
+      }
+      return results;
+    } catch (e) {
+      print('YouTubeExplode video search error: $e');
+      return [];
+    } finally {
+      ytExplode.close();
+    }
+  }
+
   static void _handleApiError(http.Response response) {
     final status = response.statusCode;
     try {
@@ -379,6 +664,14 @@ class YouTubeService {
     }
   }
 
+  static void _writeVideoCache(String key, List<Video> value) {
+    _videoSuggestionCache.remove(key);
+    _videoSuggestionCache[key] = value;
+    if (_videoSuggestionCache.length > _maxCacheEntries) {
+      _videoSuggestionCache.remove(_videoSuggestionCache.keys.first);
+    }
+  }
+
   static void _ensureNotRateLimited() {
     if (_rateLimitPauseUntil == null) {
       return;
@@ -411,6 +704,49 @@ class YouTubeService {
     if (handle.isEmpty) return '';
     return handle.startsWith('@') ? handle : '@$handle';
   }
+
+  static Duration? _parseIso8601Duration(String input) {
+    if (input.isEmpty) return null;
+    final exp = RegExp(
+      r'^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$',
+    );
+    final match = exp.firstMatch(input);
+    if (match == null) {
+      return null;
+    }
+    final days = int.tryParse(match.group(1) ?? '');
+    final hours = int.tryParse(match.group(2) ?? '');
+    final minutes = int.tryParse(match.group(3) ?? '');
+    final seconds = int.tryParse(match.group(4) ?? '');
+    final totalSeconds = (days ?? 0) * 86400 +
+        (hours ?? 0) * 3600 +
+        (minutes ?? 0) * 60 +
+        (seconds ?? 0);
+    if (totalSeconds == 0) {
+      return Duration.zero;
+    }
+    return Duration(seconds: totalSeconds);
+  }
+
+  static Duration? _parseColonDuration(String? input) {
+    if (input == null || input.isEmpty) {
+      return null;
+    }
+    if (input.toLowerCase() == 'live') {
+      return null;
+    }
+    final parts = input.split(':').map(int.tryParse).toList();
+    if (parts.any((element) => element == null)) {
+      return null;
+    }
+    while (parts.length < 3) {
+      parts.insert(0, 0);
+    }
+    final hours = parts[parts.length - 3] ?? 0;
+    final minutes = parts[parts.length - 2] ?? 0;
+    final seconds = parts[parts.length - 1] ?? 0;
+    return Duration(hours: hours, minutes: minutes, seconds: seconds);
+  }
 }
 
 class ChannelSearchException implements Exception {
@@ -423,6 +759,11 @@ class ChannelSearchException implements Exception {
 
   @override
   String toString() => 'ChannelSearchException: $message';
+}
+
+class VideoSearchException extends ChannelSearchException {
+  VideoSearchException(String message, {Object? cause})
+    : super(message, cause: cause);
 }
 
 class RateLimitException extends ChannelSearchException {

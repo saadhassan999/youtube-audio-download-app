@@ -1,19 +1,24 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
-import 'dart:io';
-import '../models/downloaded_video.dart';
-import 'database_service.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:just_audio_background/just_audio_background.dart';
-import 'notification_service.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'extractor_service.dart';
-import 'yt_dlp_native_extractor.dart';
-import 'youtube_explode_extractor.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/downloaded_video.dart';
+import '../models/video.dart';
+import '../repositories/video_repository.dart';
 import 'composite_extractor.dart';
+import 'database_service.dart';
+import 'extractor_service.dart';
+import 'notification_service.dart';
+import 'youtube_explode_extractor.dart';
+import 'yt_dlp_native_extractor.dart';
 
 // Helper class to hold playing state
 class PlayingAudio {
@@ -585,6 +590,69 @@ class DownloadService {
       ioHttpClient?.close(force: true);
       return null;
     }
+  }
+
+  static Future<DownloadedVideo?> downloadVideo(
+    Video video, {
+    bool trackSavedVideo = false,
+  }) async {
+    ensureInitialized();
+    final videoId = video.id;
+    final alreadyDownloading = _activeDownloads.contains(videoId);
+
+    if (trackSavedVideo) {
+      await VideoRepository.instance.markSavedVideoAsDownloading(
+        videoId,
+        bytesDownloaded: 0,
+      );
+    }
+
+    DownloadedVideo? result;
+    try {
+      result = await downloadAudio(
+        videoId: video.id,
+        videoUrl: 'https://www.youtube.com/watch?v=${video.id}',
+        title: video.title,
+        channelName: video.channelName,
+        thumbnailUrl: video.thumbnailUrl,
+        onProgress: (received, total) {
+          if (!trackSavedVideo) return;
+          final totalValue = total > 0 ? total : null;
+          unawaited(
+            VideoRepository.instance.updateSavedVideoProgress(
+              videoId,
+              bytesDownloaded: received,
+              bytesTotal: totalValue,
+            ),
+          );
+        },
+      );
+    } catch (e) {
+      if (trackSavedVideo) {
+        await VideoRepository.instance.markSavedVideoAsError(videoId);
+      }
+      rethrow;
+    }
+
+    if (!trackSavedVideo) {
+      return result;
+    }
+
+    final wasCancelled = consumeCancelledFlag(videoId);
+
+    if (result != null) {
+      await VideoRepository.instance.markSavedVideoAsDownloaded(
+        videoId,
+        result.filePath,
+        result.size,
+      );
+    } else if (wasCancelled) {
+      await VideoRepository.instance.resetSavedVideo(videoId);
+    } else if (!alreadyDownloading) {
+      await VideoRepository.instance.markSavedVideoAsError(videoId);
+    }
+
+    return result;
   }
 
   static Future<void> deleteDownloadedAudio(String videoId) async {

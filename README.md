@@ -7,15 +7,18 @@ Easily manage your favorite channels, download audio for offline listening, and 
 
 ## 🚀 Features
 
-- **Channel Management:** Add, search, and manage your favorite YouTube channels.
-- **Audio Download:** Download audio from YouTube videos for offline playback.
+- **Unified Search:** Look up YouTube channels *and* individual videos from the same search bar using names, URLs, or raw IDs.
+- **Saved Videos Hub:** Save any suggested video for quick access, stream instantly, download later, or remove it when you're done.
+- **Channel Management:** Add, search, and manage your favorite YouTube channels to keep new uploads in one place.
+- **Audio Download:** Download audio from YouTube videos for offline playback with automatic retry and resume.
 - **Download Manager:** View real-time download progress, cancel downloads, and manage completed files.
 - **Audio Player:** Play downloaded audio with background playback, notification controls, and lock screen integration.
 - **Background Auto-Download:** Automatically fetch and download new audios from your subscribed channels in the background.
 - **Instant UI:** Fast, responsive interface with instant loading and smooth navigation.
 - **Cross-Platform:** Works on Android (including Android 13, 14, and 15) and iOS (with some features).
-- **Persistent Storage:** All downloads and playback positions are saved locally.
+- **Persistent Storage:** Saved videos, downloads, and playback positions are stored locally.
 - **Permission Handling:** Handles notification and background playback permissions for modern Android.
+- **Offline Awareness:** Detects when the device is offline, surfaces a banner, and lets you refresh the moment connectivity returns.
 
 ---
 
@@ -52,20 +55,29 @@ Easily manage your favorite channels, download audio for offline listening, and 
 
 ## 🛠️ Usage
 
-1. **Add Channels:**  
-   Use the main screen to add your favorite YouTube channels.
+1. **Search Channels or Videos:**  
+   Use the search bar on the home screen to find channels or individual videos by name, URL, or ID. Tap a video to save it for later.
 
-2. **Download Audio:**  
-   Browse channel videos and tap the download button to save audio for offline listening.
+2. **Add Channels:**  
+   When you tap a channel suggestion (or paste a channel link), it will be added to your channel list.
 
-3. **Manage Downloads:**  
+3. **Saved Videos:**  
+   The Saved Videos section collects every video you store from search. Stream immediately, download when you’re ready, or remove it with one tap. A small loading spinner appears while a remove/download action is in progress so you can see what’s happening.
+
+4. **Download Audio:**  
+   Browse channel videos or your saved list and tap the download button to save audio for offline listening.
+
+5. **Manage Downloads:**  
    Go to the Downloads screen to view active and completed downloads. Cancel or delete as needed.
 
-4. **Play Audio:**  
+6. **Play Audio:**  
    Tap any downloaded audio to play. Use the mini player, notification panel, or lock screen controls for playback.
 
-5. **Background Auto-Download:**  
+7. **Background Auto-Download:**  
    The app will periodically check for new videos from your channels and download audio automatically in the background (requires notification/background permissions).
+
+8. **Offline Banner & Refresh:**  
+   If you lose connection, an in-app banner reminds you you’re offline—once you’re back online, pull down on the home screen to reload channel and saved video data.
 
 ---
 

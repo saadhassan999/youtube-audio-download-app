@@ -6,6 +6,7 @@ import '../models/playlist.dart';
 import '../models/downloaded_video.dart';
 import '../utils/constants.dart';
 import 'package:synchronized/synchronized.dart';
+import '../models/saved_video.dart';
 
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._init();
@@ -24,7 +25,7 @@ class DatabaseService {
     final path = join(dbPath, kAppDbName);
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _createDB,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -46,6 +47,9 @@ class DatabaseService {
           // Add new columns to channels table
           await db.execute('ALTER TABLE channels ADD COLUMN description TEXT DEFAULT ""');
           await db.execute('ALTER TABLE channels ADD COLUMN thumbnailUrl TEXT DEFAULT ""');
+        }
+        if (oldVersion < 4) {
+          await _createSavedVideosTable(db);
         }
       },
     );
@@ -91,6 +95,31 @@ class DatabaseService {
         status TEXT
       )
     ''');
+    await _createSavedVideosTable(db);
+  }
+
+  Future<void> _createSavedVideosTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS saved_videos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        videoId TEXT NOT NULL,
+        title TEXT NOT NULL,
+        channelId TEXT NOT NULL,
+        channelTitle TEXT NOT NULL,
+        durationMs INTEGER,
+        thumbnailUrl TEXT,
+        publishedAt TEXT,
+        savedAtUtc TEXT NOT NULL,
+        status TEXT NOT NULL,
+        localPath TEXT,
+        bytesTotal INTEGER,
+        bytesDownloaded INTEGER,
+        UNIQUE(videoId)
+      )
+    ''');
+    await db.execute(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_videos_video_id ON saved_videos(videoId)',
+    );
   }
 
   // Channel CRUD
@@ -205,8 +234,73 @@ class DatabaseService {
     });
   }
 
+  Future<void> upsertSavedVideo(SavedVideo video) async {
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      await dbClient.insert(
+        'saved_videos',
+        video.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+  }
+
+  Future<SavedVideo?> getSavedVideo(String videoId) async {
+    return await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      final maps = await dbClient.query(
+        'saved_videos',
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+        limit: 1,
+      );
+      if (maps.isNotEmpty) {
+        return SavedVideo.fromMap(maps.first);
+      }
+      return null;
+    });
+  }
+
+  Future<List<SavedVideo>> getSavedVideos() async {
+    return await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      final maps = await dbClient.query(
+        'saved_videos',
+        orderBy: 'savedAtUtc DESC',
+      );
+      return maps.map(SavedVideo.fromMap).toList(growable: false);
+    });
+  }
+
+  Future<void> updateSavedVideoFields(
+    String videoId,
+    Map<String, Object?> values,
+  ) async {
+    if (values.isEmpty) return;
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      await dbClient.update(
+        'saved_videos',
+        values,
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
+    });
+  }
+
+  Future<void> deleteSavedVideo(String videoId) async {
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      await dbClient.delete(
+        'saved_videos',
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
+    });
+  }
+
   Future close() async {
     final dbClient = await db;
     dbClient.close();
   }
-} 
+}

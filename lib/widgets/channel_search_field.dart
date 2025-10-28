@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 
 import '../core/snackbar_bus.dart';
 import '../models/channel.dart';
+import '../models/video.dart';
+import '../repositories/video_repository.dart';
 import '../services/database_service.dart';
 import '../services/youtube_service.dart';
 import '../utils/youtube_utils.dart';
@@ -23,6 +25,22 @@ class ChannelSearchField extends StatefulWidget {
   State<ChannelSearchField> createState() => _ChannelSearchFieldState();
 }
 
+enum _SuggestionType { channel, video }
+
+class _SearchSuggestion {
+  _SearchSuggestion.channel(this.channel)
+    : video = null,
+      type = _SuggestionType.channel;
+
+  _SearchSuggestion.video(this.video)
+    : channel = null,
+      type = _SuggestionType.video;
+
+  final _SuggestionType type;
+  final Channel? channel;
+  final Video? video;
+}
+
 class _ChannelSearchFieldState extends State<ChannelSearchField>
     with WidgetsBindingObserver {
   final TextEditingController _controller = TextEditingController();
@@ -30,7 +48,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
   final LayerLink _layerLink = LayerLink();
   final GlobalKey _targetKey = GlobalKey();
 
-  List<Channel> _suggestions = [];
+  List<_SearchSuggestion> _suggestions = [];
   bool _isLoading = false;
   Timer? _debounceTimer;
   String _currentQuery = '';
@@ -90,12 +108,12 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
 
     _debounceTimer = Timer(const Duration(milliseconds: 350), () async {
       if (_currentQuery.trim() == trimmed) {
-        await _searchChannels(trimmed);
+        await _searchSuggestions(trimmed);
       }
     });
   }
 
-  Future<void> _searchChannels(String query) async {
+  Future<void> _searchSuggestions(String query) async {
     if (query.isEmpty) return;
 
     final requestId = ++_searchRequestId;
@@ -107,55 +125,82 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
     });
     _updateOverlay();
 
-    try {
-      final suggestions = await YouTubeService.getChannelSuggestions(query);
-      if (requestId != _searchRequestId) return;
+    List<Channel> channels = const [];
+    List<Video> videos = const [];
+    ChannelSearchException? channelError;
+    ChannelSearchException? videoError;
+    RateLimitException? rateLimit;
 
-      setState(() {
-        _suggestions = suggestions;
-        _isLoading = false;
-        if (suggestions.isEmpty) {
-          _statusMessage =
-              'No channels found for "$query". Try a different name or paste the channel URL.';
-          _statusIsError = false;
-        }
-      });
-      _updateOverlay();
+    try {
+      channels = await YouTubeService.getChannelSuggestions(query);
     } on RateLimitException catch (e) {
-      if (requestId != _searchRequestId) return;
-      final retryHint = e.retryAfter == null
-          ? 'Please try again soon.'
-          : 'Please try again in ${_formatRetryAfter(e.retryAfter!)}.';
-      setState(() {
-        _suggestions = [];
-        _isLoading = false;
-        _statusMessage = 'We’re hitting YouTube limits right now. $retryHint';
-        _statusIsError = true;
-      });
-      _showSnackBar('YouTube rate limit reached. $retryHint');
-      _updateOverlay();
+      rateLimit = e;
     } on ChannelSearchException catch (e) {
-      if (e.isCancellation || requestId != _searchRequestId) return;
-      setState(() {
-        _suggestions = [];
-        _isLoading = false;
-        _statusMessage = e.message;
-        _statusIsError = true;
-      });
-      _showSnackBar(e.message);
-      _updateOverlay();
+      if (!e.isCancellation) {
+        channelError = e;
+      }
     } catch (e) {
-      if (requestId != _searchRequestId) return;
-      setState(() {
-        _suggestions = [];
-        _isLoading = false;
-        _statusMessage =
-            'Something went wrong while searching. Please check your connection and try again.';
-        _statusIsError = true;
-      });
-      _showSnackBar('Channel search failed. Please try again.');
-      _updateOverlay();
+      channelError = ChannelSearchException(e.toString(), cause: e);
     }
+
+    try {
+      videos = await YouTubeService.getVideoSuggestions(query);
+    } on RateLimitException catch (e) {
+      rateLimit = e;
+    } on ChannelSearchException catch (e) {
+      if (!e.isCancellation) {
+        videoError = e;
+      }
+    } catch (e) {
+      videoError = ChannelSearchException(e.toString(), cause: e);
+    }
+
+    if (requestId != _searchRequestId) {
+      return;
+    }
+
+    final merged = <_SearchSuggestion>[
+      ...channels.map(_SearchSuggestion.channel),
+      ...videos.map(_SearchSuggestion.video),
+    ];
+
+    String? statusMessage;
+    bool statusIsError = false;
+
+    if (rateLimit != null && merged.isEmpty) {
+      final retryHint = rateLimit.retryAfter == null
+          ? 'Please try again soon.'
+          : 'Please try again in ${_formatRetryAfter(rateLimit.retryAfter!)}.';
+      statusMessage = 'We’re hitting YouTube limits right now. $retryHint';
+      statusIsError = true;
+      _showSnackBar('YouTube rate limit reached. $retryHint');
+    } else {
+      if (channelError != null && channels.isEmpty) {
+        statusMessage = channelError.message;
+        statusIsError = true;
+      } else if (videoError != null && videos.isEmpty) {
+        statusMessage = videoError.message;
+        statusIsError = true;
+      } else if (merged.isEmpty) {
+        statusMessage =
+            'No channels or videos found for "$query". Try a different name or paste a link.';
+      }
+
+      if (channelError != null && channels.isNotEmpty) {
+        _showSnackBar(channelError.message);
+      }
+      if (videoError != null && videos.isNotEmpty) {
+        _showSnackBar(videoError.message);
+      }
+    }
+
+    setState(() {
+      _suggestions = merged;
+      _isLoading = false;
+      _statusMessage = statusMessage;
+      _statusIsError = statusIsError;
+    });
+    _updateOverlay();
   }
 
   void _onSuggestionSelected(Channel channel) async {
@@ -183,6 +228,24 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
     _updateOverlay();
 
     showGlobalSnackBarMessage('Added channel: ${channel.name}');
+  }
+
+  Future<void> _onVideoSelected(Video video) async {
+    YouTubeService.cancelActiveSearch();
+    try {
+      await VideoRepository.instance.upsertSavedVideo(video);
+      _controller.clear();
+      setState(() {
+        _suggestions = [];
+        _statusMessage = null;
+        _statusIsError = false;
+      });
+      _focusNode.unfocus();
+      _updateOverlay();
+      showGlobalSnackBarMessage('Saved to Saved Videos: ${video.title}');
+    } catch (e) {
+      _showSnackBar('Failed to save video: $e');
+    }
   }
 
   void _onManualAdd() {
@@ -260,7 +323,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
       return Padding(
         padding: EdgeInsets.all(16),
         child: Text(
-          _statusMessage ?? 'No channels to display.',
+          _statusMessage ?? 'No results to display.',
           style: TextStyle(
             fontSize: 14,
             color: _statusIsError
@@ -277,71 +340,239 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
       padding: EdgeInsets.zero,
       itemCount: _suggestions.length,
       itemBuilder: (context, index) {
-        final channel = _suggestions[index];
-        final handleText =
-            channel.handle?.isNotEmpty == true ? channel.handle : null;
-        final hasSubscriberCount =
-            !channel.hiddenSubscriberCount && channel.subscriberCount != null;
-        final subscriberText = hasSubscriberCount
-            ? '${formatSubscriberCount(channel.subscriberCount)} subscribers'
-            : 'Subscribers hidden';
-
-        return ListTile(
-          leading: channel.thumbnailUrl.isNotEmpty
-              ? ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: Image.network(
-                    channel.thumbnailUrl,
-                    width: 40,
-                    height: 40,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) {
-                      return Container(
-                        width: 40,
-                        height: 40,
-                        color: Colors.grey[300],
-                        child: Icon(Icons.person, color: Colors.grey[600]),
-                      );
-                    },
-                  ),
-                )
-              : Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Icon(Icons.person, color: Colors.grey[600]),
-                ),
-          title: Text(
-            channel.name,
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          subtitle: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (handleText != null)
-                Text(
-                  handleText,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).textTheme.bodySmall?.color ??
-                        Colors.grey[600],
-                  ),
-                ),
-              Text(
-                subscriberText,
-                style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-              ),
-            ],
-          ),
-          onTap: () => _onSuggestionSelected(channel),
-          trailing: Icon(Icons.add_circle_outline, color: Colors.blue),
+        final suggestion = _suggestions[index];
+        if (suggestion.type == _SuggestionType.channel) {
+          final channel = suggestion.channel;
+          if (channel == null) {
+            return const SizedBox.shrink();
+          }
+          return _buildChannelSuggestionTile(
+            context,
+            channel,
+            isFirstChannel: index == 0 ||
+                _suggestions[index - 1].type != _SuggestionType.channel,
+          );
+        }
+        final video = suggestion.video;
+        if (video == null) {
+          return const SizedBox.shrink();
+        }
+        return _buildVideoSuggestionTile(
+          context,
+          video,
+          isFirstVideo:
+              index == 0 || _suggestions[index - 1].type != _SuggestionType.video,
         );
       },
     );
+  }
+
+  Widget _buildChannelSuggestionTile(
+    BuildContext context,
+    Channel channel, {
+    bool isFirstChannel = false,
+  }) {
+    final handleText =
+        channel.handle?.isNotEmpty == true ? channel.handle : null;
+    final hasSubscriberCount =
+        !channel.hiddenSubscriberCount && channel.subscriberCount != null;
+    final subscriberText = hasSubscriberCount
+        ? '${formatSubscriberCount(channel.subscriberCount)} subscribers'
+        : 'Subscribers hidden';
+
+    final children = <Widget>[];
+    if (isFirstChannel) {
+      children.add(_buildSuggestionHeader(context, 'Channels'));
+    }
+    children.add(
+      ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        leading: _buildChannelAvatar(channel.thumbnailUrl),
+        title: Text(
+          channel.name,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (handleText != null)
+              Text(
+                handleText,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).textTheme.bodySmall?.color ??
+                      Colors.grey[600],
+                ),
+              ),
+            Text(
+              subscriberText,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
+        onTap: () => _onSuggestionSelected(channel),
+        trailing: const Icon(Icons.add_circle_outline, color: Colors.blue),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _buildVideoSuggestionTile(
+    BuildContext context,
+    Video video, {
+    bool isFirstVideo = false,
+  }) {
+    final children = <Widget>[];
+    if (isFirstVideo) {
+      children.add(_buildSuggestionHeader(context, 'Videos'));
+    }
+    children.add(
+      ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        leading: _buildVideoThumbnail(video.thumbnailUrl, video.duration),
+        title: Text(
+          video.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          video.channelName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+        trailing: const Icon(Icons.library_add, color: Colors.blue),
+        onTap: () => _onVideoSelected(video),
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _buildSuggestionHeader(BuildContext context, String label) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              fontWeight: FontWeight.w600,
+              color: Colors.grey[700],
+            ) ??
+            TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey[700],
+            ),
+      ),
+    );
+  }
+
+  Widget _buildChannelAvatar(String thumbnailUrl) {
+    if (thumbnailUrl.isEmpty) {
+      return Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: Colors.grey[300],
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Icon(Icons.person, color: Colors.grey[600]),
+      );
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(4),
+      child: Image.network(
+        thumbnailUrl,
+        width: 40,
+        height: 40,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) {
+          return Container(
+            width: 40,
+            height: 40,
+            color: Colors.grey[300],
+            child: Icon(Icons.person, color: Colors.grey[600]),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildVideoThumbnail(String url, Duration? duration) {
+    final durationLabel = duration != null ? _formatVideoDuration(duration) : null;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(6),
+      child: SizedBox(
+        width: 88,
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (url.isNotEmpty)
+                Image.network(
+                  url,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stack) => Container(
+                    color: Colors.grey[300],
+                    child: const Icon(Icons.videocam, color: Colors.grey),
+                  ),
+                )
+              else
+                Container(
+                  color: Colors.grey[300],
+                  child: const Icon(Icons.videocam, color: Colors.grey),
+                ),
+              if (durationLabel != null)
+                Positioned(
+                  right: 4,
+                  bottom: 4,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      durationLabel,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatVideoDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    final buffer = StringBuffer();
+    if (hours > 0) {
+      buffer.write(hours.toString());
+      buffer.write(':');
+      buffer.write(minutes.toString().padLeft(2, '0'));
+    } else {
+      buffer.write(minutes.toString());
+    }
+    buffer.write(':');
+    buffer.write(seconds.toString().padLeft(2, '0'));
+    return buffer.toString();
   }
 
   bool get _shouldShowOverlay {
@@ -473,8 +704,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
             focusNode: _focusNode,
             style: const TextStyle(color: Colors.black87),
             decoration: InputDecoration(
-              labelText: 'Search for YouTube channels...',
-              hintText: 'Type channel name (e.g., "PewDiePie", "MrBeast")',
+              labelText: 'Search channels or videos...',
+              hintText: 'Try a channel or video (e.g., "MrBeast", "lofi beats")',
               prefixIcon: Icon(Icons.search),
               suffixIcon: _isLoading
                   ? Padding(
