@@ -98,8 +98,8 @@ Future<void> backgroundTask() async {
           );
           continue;
         }
-        // If lastVideoId is empty, process top 3 (first install, legacy case)
-        newVideos = videos.take(3).toList();
+        // If lastVideoId is empty, process the single latest video (first install, legacy case)
+        newVideos = videos.take(1).toList();
       } else if (lastIndex == 0) {
         // lastVideoId is already the newest video - no new videos to download
         print(
@@ -129,7 +129,7 @@ Future<void> backgroundTask() async {
       int processedCount = 0;
       String? lastDownloadedId;
 
-      for (final video in newVideos.take(3)) {
+      for (final video in newVideos.take(1)) {
         final isDownloaded = await DownloadService.isVideoDownloaded(video.id);
         if (!isDownloaded) {
           print('Background task: Downloading ${video.title}');
@@ -207,6 +207,8 @@ void main() async {
         'com.example.youtube_audio_downloader.channel.audio',
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
+    fastForwardInterval: Duration(seconds: 10),
+    rewindInterval: Duration(seconds: 10),
   );
   print('JustAudioBackground initialized successfully');
 

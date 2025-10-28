@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import '../services/download_service.dart';
 import '../models/downloaded_video.dart';
@@ -21,6 +23,11 @@ class AudioControls extends StatefulWidget {
 
   @override
   _AudioControlsState createState() => _AudioControlsState();
+}
+
+class _RelativeSeekIntent extends Intent {
+  const _RelativeSeekIntent(this.offset);
+  final Duration offset;
 }
 
 class _AudioControlsState extends State<AudioControls> {
@@ -80,6 +87,18 @@ class _AudioControlsState extends State<AudioControls> {
     }
   }
 
+  Future<void> _seekRelative(Duration offset) async {
+    final target = await DownloadService.seekRelative(offset);
+    if (!mounted) return;
+    if (target != null) {
+      final direction = Directionality.of(context);
+      final msg = offset.isNegative
+          ? 'Rewound to ${_formatDuration(target)}'
+          : 'Forward to ${_formatDuration(target)}';
+      SemanticsService.announce(msg, direction);
+    }
+  }
+
   void _setPlaybackSpeed(double speed) async {
     await DownloadService.globalAudioPlayer.setSpeed(speed);
     setState(() {
@@ -103,267 +122,347 @@ class _AudioControlsState extends State<AudioControls> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Theme.of(context).cardColor,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black12,
-            blurRadius: 10,
-            offset: Offset(0, -2),
-          ),
-        ],
+    final shortcuts = <LogicalKeySet, Intent>{
+      LogicalKeySet(LogicalKeyboardKey.arrowLeft): const _RelativeSeekIntent(
+        Duration(seconds: -10),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Handle bar
-          Container(
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: Colors.grey[300],
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          SizedBox(height: 16),
+      LogicalKeySet(LogicalKeyboardKey.arrowRight): const _RelativeSeekIntent(
+        Duration(seconds: 10),
+      ),
+    };
 
-          // Track info
-          if (widget.currentVideo != null) ...[
-            Row(
+    return Shortcuts(
+      shortcuts: shortcuts,
+      child: Actions(
+        actions: <Type, Action<Intent>>{
+          _RelativeSeekIntent: CallbackAction<_RelativeSeekIntent>(
+            onInvoke: (intent) {
+              _seekRelative(intent.offset);
+              return null;
+            },
+          ),
+        },
+        child: Focus(
+          autofocus: true,
+          child: Container(
+            padding: EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 10,
+                  offset: Offset(0, -2),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                // Thumbnail
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: widget.currentVideo!.thumbnailUrl.isNotEmpty
-                      ? Image.network(
-                          widget.currentVideo!.thumbnailUrl,
-                          width: 60,
-                          height: 60,
-                          fit: BoxFit.cover,
-                          errorBuilder: (context, error, stackTrace) {
-                            return Container(
-                              width: 60,
-                              height: 60,
-                              color: Colors.grey[300],
-                              child: Icon(
-                                Icons.music_note,
-                                color: Colors.grey[600],
+                // Handle bar
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                SizedBox(height: 16),
+
+                // Track info
+                if (widget.currentVideo != null) ...[
+                  Row(
+                    children: [
+                      // Thumbnail
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: widget.currentVideo!.thumbnailUrl.isNotEmpty
+                            ? Image.network(
+                                widget.currentVideo!.thumbnailUrl,
+                                width: 60,
+                                height: 60,
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) {
+                                  return Container(
+                                    width: 60,
+                                    height: 60,
+                                    color: Colors.grey[300],
+                                    child: Icon(
+                                      Icons.music_note,
+                                      color: Colors.grey[600],
+                                    ),
+                                  );
+                                },
+                              )
+                            : Container(
+                                width: 60,
+                                height: 60,
+                                color: Colors.grey[300],
+                                child: Icon(
+                                  Icons.music_note,
+                                  color: Colors.grey[600],
+                                ),
                               ),
-                            );
-                          },
-                        )
-                      : Container(
-                          width: 60,
-                          height: 60,
-                          color: Colors.grey[300],
-                          child: Icon(
-                            Icons.music_note,
-                            color: Colors.grey[600],
+                      ),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              widget.currentVideo!.title,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                fontSize: 16,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            SizedBox(height: 4),
+                            Text(
+                              widget.currentVideo!.channelName,
+                              style: TextStyle(
+                                color: Colors.grey[600],
+                                fontSize: 14,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Speed control
+                      PopupMenuButton<double>(
+                        icon: Container(
+                          padding: EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[200],
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '${_playbackSpeed.toStringAsFixed(1)}x',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
-                ),
-                SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.currentVideo!.title,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 16,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      SizedBox(height: 4),
-                      Text(
-                        widget.currentVideo!.channelName,
-                        style: TextStyle(color: Colors.grey[600], fontSize: 14),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        itemBuilder: (context) =>
+                            [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                                .map(
+                                  (speed) => PopupMenuItem(
+                                    value: speed,
+                                    child: Text('${speed.toStringAsFixed(1)}x'),
+                                  ),
+                                )
+                                .toList(),
+                        onSelected: _setPlaybackSpeed,
                       ),
                     ],
                   ),
+                  SizedBox(height: 16),
+                ],
+
+                // Progress bar
+                StreamBuilder<Duration?>(
+                  stream: DownloadService.globalAudioPlayer.durationStream,
+                  builder: (context, durationSnapshot) {
+                    final duration = durationSnapshot.data ?? Duration.zero;
+                    return StreamBuilder<Duration>(
+                      stream: DownloadService.globalAudioPlayer.positionStream,
+                      builder: (context, positionSnapshot) {
+                        final position = positionSnapshot.data ?? Duration.zero;
+                        final progress = duration.inSeconds > 0
+                            ? position.inSeconds / duration.inSeconds
+                            : 0.0;
+                        const epsilon = Duration(milliseconds: 300);
+                        final canRewind = position > epsilon;
+                        final canForward = duration > Duration.zero
+                            ? (duration - position) > epsilon
+                            : true;
+                        final skipInterval = DownloadService.skipInterval;
+
+                        return Column(
+                          children: [
+                            SliderTheme(
+                              data: SliderTheme.of(context).copyWith(
+                                activeTrackColor: Theme.of(
+                                  context,
+                                ).primaryColor,
+                                inactiveTrackColor: Colors.grey[300],
+                                thumbColor: Theme.of(context).primaryColor,
+                                thumbShape: const RoundSliderThumbShape(
+                                  enabledThumbRadius: 6,
+                                ),
+                                trackHeight: 4,
+                              ),
+                              child: Slider(
+                                value: _isDragging ? _dragValue : progress,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _isDragging = true;
+                                    _dragValue = value;
+                                  });
+                                },
+                                onChangeEnd: (value) {
+                                  setState(() {
+                                    _isDragging = false;
+                                  });
+                                  _seekToPosition(value);
+                                },
+                              ),
+                            ),
+                            Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 16),
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    _formatDuration(position),
+                                    style: TextStyle(
+                                      color: Colors.grey[600],
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                  Text(
+                                    _formatDuration(duration),
+                                    style: TextStyle(
+                                      color: Colors.grey[600],
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            SizedBox(height: 16),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                // Previous track
+                                IconButton(
+                                  onPressed: widget.currentIndex > 0
+                                      ? _skipToPrevious
+                                      : null,
+                                  icon: const Icon(
+                                    Icons.skip_previous,
+                                    size: 32,
+                                  ),
+                                  color: widget.currentIndex > 0
+                                      ? null
+                                      : Colors.grey[400],
+                                ),
+                                Tooltip(
+                                  message: 'Rewind 10 seconds',
+                                  waitDuration: const Duration(
+                                    milliseconds: 400,
+                                  ),
+                                  child: IconButton(
+                                    onPressed: canRewind
+                                        ? () => _seekRelative(-skipInterval)
+                                        : null,
+                                    icon: const Icon(Icons.replay_10, size: 32),
+                                    color: canRewind ? null : Colors.grey[400],
+                                  ),
+                                ),
+                                // Play/Pause
+                                ValueListenableBuilder<PlayingAudio?>(
+                                  valueListenable:
+                                      DownloadService.globalPlayingNotifier,
+                                  builder: (context, playing, _) {
+                                    final isPlaying =
+                                        playing?.isPlaying ?? false;
+                                    final isCurrentTrack =
+                                        playing?.videoId ==
+                                        widget.currentVideo?.videoId;
+
+                                    return Container(
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(context).primaryColor,
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: IconButton(
+                                        onPressed: _playPause,
+                                        icon: Icon(
+                                          (isPlaying && isCurrentTrack)
+                                              ? Icons.pause
+                                              : Icons.play_arrow,
+                                          size: 32,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                                Tooltip(
+                                  message: 'Forward 10 seconds',
+                                  waitDuration: const Duration(
+                                    milliseconds: 400,
+                                  ),
+                                  child: IconButton(
+                                    onPressed: canForward
+                                        ? () => _seekRelative(skipInterval)
+                                        : null,
+                                    icon: const Icon(
+                                      Icons.forward_10,
+                                      size: 32,
+                                    ),
+                                    color: canForward ? null : Colors.grey[400],
+                                  ),
+                                ),
+                                // Next track
+                                IconButton(
+                                  onPressed:
+                                      widget.currentIndex <
+                                          widget.playlist.length - 1
+                                      ? _skipToNext
+                                      : null,
+                                  icon: const Icon(Icons.skip_next, size: 32),
+                                  color:
+                                      widget.currentIndex <
+                                          widget.playlist.length - 1
+                                      ? null
+                                      : Colors.grey[400],
+                                ),
+                              ],
+                            ),
+                          ],
+                        );
+                      },
+                    );
+                  },
                 ),
-                // Speed control
-                PopupMenuButton<double>(
-                  icon: Container(
-                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                SizedBox(height: 8),
+
+                // Playlist info
+                if (widget.playlist.isNotEmpty) ...[
+                  Container(
+                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
-                      color: Colors.grey[200],
+                      color: Colors.grey[100],
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(
-                      '${_playbackSpeed.toStringAsFixed(1)}x',
+                      '${widget.currentIndex + 1} of ${widget.playlist.length}',
                       style: TextStyle(
+                        color: Colors.grey[600],
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
-                  itemBuilder: (context) => [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-                      .map(
-                        (speed) => PopupMenuItem(
-                          value: speed,
-                          child: Text('${speed.toStringAsFixed(1)}x'),
-                        ),
-                      )
-                      .toList(),
-                  onSelected: _setPlaybackSpeed,
-                ),
+                ],
+
+                SizedBox(height: 16),
               ],
             ),
-            SizedBox(height: 16),
-          ],
-
-          // Progress bar
-          StreamBuilder<Duration?>(
-            stream: DownloadService.globalAudioPlayer.durationStream,
-            builder: (context, durationSnapshot) {
-              final duration = durationSnapshot.data ?? Duration.zero;
-              return StreamBuilder<Duration>(
-                stream: DownloadService.globalAudioPlayer.positionStream,
-                builder: (context, positionSnapshot) {
-                  final position = positionSnapshot.data ?? Duration.zero;
-                  final progress = duration.inSeconds > 0
-                      ? position.inSeconds / duration.inSeconds
-                      : 0.0;
-
-                  return Column(
-                    children: [
-                      SliderTheme(
-                        data: SliderTheme.of(context).copyWith(
-                          activeTrackColor: Theme.of(context).primaryColor,
-                          inactiveTrackColor: Colors.grey[300],
-                          thumbColor: Theme.of(context).primaryColor,
-                          thumbShape: RoundSliderThumbShape(
-                            enabledThumbRadius: 6,
-                          ),
-                          trackHeight: 4,
-                        ),
-                        child: Slider(
-                          value: _isDragging ? _dragValue : progress,
-                          onChanged: (value) {
-                            setState(() {
-                              _isDragging = true;
-                              _dragValue = value;
-                            });
-                          },
-                          onChangeEnd: (value) {
-                            setState(() {
-                              _isDragging = false;
-                            });
-                            _seekToPosition(value);
-                          },
-                        ),
-                      ),
-                      Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 16),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              _formatDuration(position),
-                              style: TextStyle(
-                                color: Colors.grey[600],
-                                fontSize: 12,
-                              ),
-                            ),
-                            Text(
-                              _formatDuration(duration),
-                              style: TextStyle(
-                                color: Colors.grey[600],
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              );
-            },
           ),
-          SizedBox(height: 16),
-
-          // Control buttons
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              // Previous button
-              IconButton(
-                onPressed: widget.currentIndex > 0 ? _skipToPrevious : null,
-                icon: Icon(Icons.skip_previous, size: 32),
-                color: widget.currentIndex > 0 ? null : Colors.grey[400],
-              ),
-
-              // Play/Pause button
-              ValueListenableBuilder<PlayingAudio?>(
-                valueListenable: DownloadService.globalPlayingNotifier,
-                builder: (context, playing, _) {
-                  final isPlaying = playing?.isPlaying ?? false;
-                  final isCurrentTrack =
-                      playing?.videoId == widget.currentVideo?.videoId;
-
-                  return Container(
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).primaryColor,
-                      shape: BoxShape.circle,
-                    ),
-                    child: IconButton(
-                      onPressed: _playPause,
-                      icon: Icon(
-                        (isPlaying && isCurrentTrack)
-                            ? Icons.pause
-                            : Icons.play_arrow,
-                        size: 32,
-                        color: Colors.white,
-                      ),
-                    ),
-                  );
-                },
-              ),
-
-              // Next button
-              IconButton(
-                onPressed: widget.currentIndex < widget.playlist.length - 1
-                    ? _skipToNext
-                    : null,
-                icon: Icon(Icons.skip_next, size: 32),
-                color: widget.currentIndex < widget.playlist.length - 1
-                    ? null
-                    : Colors.grey[400],
-              ),
-            ],
-          ),
-          SizedBox(height: 8),
-
-          // Playlist info
-          if (widget.playlist.isNotEmpty) ...[
-            Container(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.grey[100],
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                '${widget.currentIndex + 1} of ${widget.playlist.length}',
-                style: TextStyle(
-                  color: Colors.grey[600],
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ],
-
-          SizedBox(height: 16),
-        ],
+        ),
       ),
     );
   }

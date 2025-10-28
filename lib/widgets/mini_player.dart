@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/semantics.dart';
 import '../services/download_service.dart';
 import 'audio_player_bottom_sheet.dart';
 import 'dart:io';
@@ -80,6 +82,29 @@ class _MiniPlayerState extends State<MiniPlayer> {
     setState(() {
       _current = null;
     });
+  }
+
+  Future<void> _seekRelative(Duration offset) async {
+    final target = await DownloadService.seekRelative(offset);
+    if (!mounted) return;
+    if (target != null) {
+      final direction = Directionality.of(context);
+      final announcement = offset.isNegative
+          ? 'Rewound to ${_formatDuration(target)}'
+          : 'Forward to ${_formatDuration(target)}';
+      SemanticsService.announce(announcement, direction);
+    }
+  }
+
+  String _formatDuration(Duration duration) {
+    String twoDigits(int n) => n.toString().padLeft(2, '0');
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    final hours = duration.inHours;
+    if (hours > 0) {
+      return '$hours:${twoDigits(minutes)}:${twoDigits(seconds)}';
+    }
+    return '${twoDigits(minutes)}:${twoDigits(seconds)}';
   }
 
   @override
@@ -177,35 +202,86 @@ class _MiniPlayerState extends State<MiniPlayer> {
                 ),
               ),
               // Control buttons
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    onPressed: _playPause,
-                    icon: Icon(
-                      playing.isPlaying ? Icons.pause : Icons.play_arrow,
-                      size: 22,
-                    ),
-                    color: Theme.of(context).primaryColor,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                  IconButton(
-                    onPressed: _showFullPlayer,
-                    icon: const Icon(Icons.expand_less, size: 22),
-                    color: Colors.grey[600],
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                  IconButton(
-                    onPressed: _clearSession,
-                    icon: const Icon(Icons.close, size: 20),
-                    color: Colors.grey[500],
-                    tooltip: 'Close player',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                ],
+              StreamBuilder<Duration?>(
+                stream: DownloadService.globalAudioPlayer.durationStream,
+                builder: (context, durationSnapshot) {
+                  final duration = durationSnapshot.data ?? Duration.zero;
+                  return StreamBuilder<Duration>(
+                    stream: DownloadService.globalAudioPlayer.positionStream,
+                    builder: (context, positionSnapshot) {
+                      final position = positionSnapshot.data ?? Duration.zero;
+                      const epsilon = Duration(milliseconds: 300);
+                      final canRewind = position > epsilon;
+                      final canForward = duration > Duration.zero
+                          ? (duration - position) > epsilon
+                          : true;
+                      final skipInterval = DownloadService.skipInterval;
+
+                      return Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Tooltip(
+                            message: 'Rewind 10 seconds',
+                            waitDuration: const Duration(milliseconds: 400),
+                            child: IconButton(
+                              onPressed: canRewind
+                                  ? () => _seekRelative(-skipInterval)
+                                  : null,
+                              icon: const Icon(Icons.replay_10, size: 22),
+                              color: canRewind
+                                  ? Colors.grey[600]
+                                  : Colors.grey[400],
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: _playPause,
+                            icon: Icon(
+                              playing.isPlaying
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
+                              size: 22,
+                            ),
+                            color: Theme.of(context).primaryColor,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                          Tooltip(
+                            message: 'Forward 10 seconds',
+                            waitDuration: const Duration(milliseconds: 400),
+                            child: IconButton(
+                              onPressed: canForward
+                                  ? () => _seekRelative(skipInterval)
+                                  : null,
+                              icon: const Icon(Icons.forward_10, size: 22),
+                              color: canForward
+                                  ? Colors.grey[600]
+                                  : Colors.grey[400],
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: _showFullPlayer,
+                            icon: const Icon(Icons.expand_less, size: 22),
+                            color: Colors.grey[600],
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                          IconButton(
+                            onPressed: _clearSession,
+                            icon: const Icon(Icons.close, size: 20),
+                            color: Colors.grey[500],
+                            tooltip: 'Close player',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                },
               ),
             ],
           ),

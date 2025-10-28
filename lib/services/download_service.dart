@@ -66,8 +66,9 @@ class DownloadService {
   // Global notifier for currently playing videoId and playing state
   static final ValueNotifier<PlayingAudio?> globalPlayingNotifier =
       ValueNotifier<PlayingAudio?>(null);
-  static final ValueNotifier<bool> globalSessionActive =
-      ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> globalSessionActive = ValueNotifier<bool>(
+    false,
+  );
   static final ValueNotifier<int> downloadedVideosChanged = ValueNotifier<int>(
     0,
   );
@@ -89,14 +90,17 @@ class DownloadService {
     NativeYtDlpExtractor(),
     YoutubeExplodeExtractor(),
   );
-  static const MethodChannel _foregroundChannel =
-      MethodChannel('download_foreground_service');
+  static const MethodChannel _foregroundChannel = MethodChannel(
+    'download_foreground_service',
+  );
   static bool _isForegroundServiceActive = false;
 
   static int? _parseTotalFromContentRange(String? contentRange) {
     if (contentRange == null || contentRange.isEmpty) return null;
-    final match = RegExp(r'bytes\s+\d+-\d+/(\d+|\*)', caseSensitive: false)
-        .firstMatch(contentRange);
+    final match = RegExp(
+      r'bytes\s+\d+-\d+/(\d+|\*)',
+      caseSensitive: false,
+    ).firstMatch(contentRange);
     if (match == null) return null;
     final totalPart = match.group(1);
     if (totalPart == null || totalPart == '*') return null;
@@ -109,8 +113,9 @@ class DownloadService {
     int totalBytes,
   ) {
     if (totalBytes <= 0) return;
-    final progressValue =
-        (receivedBytes / totalBytes).clamp(0.0, 1.0).toDouble();
+    final progressValue = (receivedBytes / totalBytes)
+        .clamp(0.0, 1.0)
+        .toDouble();
     final previous = downloadProgressNotifier.value[videoId] ?? 0.0;
     if ((progressValue - previous).abs() >= 0.01 || progressValue >= 0.999) {
       downloadProgressNotifier.value = {
@@ -124,10 +129,7 @@ class DownloadService {
     try {
       final response = await http.head(
         Uri.parse(url),
-        headers: {
-          ..._downloadRequestHeaders,
-          'User-Agent': _downloadUserAgent,
-        },
+        headers: {..._downloadRequestHeaders, 'User-Agent': _downloadUserAgent},
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return null;
@@ -188,6 +190,12 @@ class DownloadService {
   static const String _lastVideoStateKey = 'global_last_video_state';
   static const String _sessionActiveKey = 'global_session_active';
   static bool _hasActiveSession = false;
+  static final Map<String, int> _lastPersistedPositionMs = {};
+  static const int _positionPersistIntervalMs = 500;
+  static const Duration _skipInterval = Duration(seconds: 10);
+  static const Duration _seekDebounceEpsilon = Duration(milliseconds: 250);
+  static bool _isSeekInFlight = false;
+  static Duration? _pendingSeekTarget;
 
   static void ensureInitialized() {
     if (_initialized) return;
@@ -340,11 +348,11 @@ class DownloadService {
           final response = await client.send(request);
 
           if (resumeThisAttempt && response.statusCode == 416) {
-            knownRemoteLength ??=
-                _parseTotalFromContentRange(response.headers['content-range']);
+            knownRemoteLength ??= _parseTotalFromContentRange(
+              response.headers['content-range'],
+            );
             final currentSize = await file.length();
-            if (knownRemoteLength != null &&
-                currentSize >= knownRemoteLength) {
+            if (knownRemoteLength != null && currentSize >= knownRemoteLength) {
               fileSize = currentSize;
               break;
             }
@@ -352,9 +360,7 @@ class DownloadService {
             if (fileExists) {
               await file.delete();
             }
-            throw Exception(
-              'Resume rejected with status 416 for $videoId',
-            );
+            throw Exception('Resume rejected with status 416 for $videoId');
           }
 
           if (resumeThisAttempt &&
@@ -374,8 +380,9 @@ class DownloadService {
             );
           }
 
-          knownRemoteLength ??=
-              _parseTotalFromContentRange(response.headers['content-range']);
+          knownRemoteLength ??= _parseTotalFromContentRange(
+            response.headers['content-range'],
+          );
           if (knownRemoteLength == null) {
             final responseLength = response.contentLength ?? 0;
             if (responseLength > 0) {
@@ -544,9 +551,7 @@ class DownloadService {
       if (wasCancelled) {
         _recentlyCancelledDownloads.remove(videoId);
         _downloadCancelFlags.remove(videoId);
-        final newMap = Map<String, double>.from(
-          downloadProgressNotifier.value,
-        );
+        final newMap = Map<String, double>.from(downloadProgressNotifier.value);
         newMap.remove(videoId);
         downloadProgressNotifier.value = newMap;
         await _handleDownloadRemoved(videoId);
@@ -665,6 +670,7 @@ class DownloadService {
       await prefs.remove(_lastVideoStateKey);
       if (closingVideoId != null) {
         await prefs.remove('audio_position_$closingVideoId');
+        _lastPersistedPositionMs.remove(closingVideoId);
       }
     }
   }
@@ -723,6 +729,8 @@ class DownloadService {
           filePath: video.filePath,
           isLocal: true,
         );
+        _lastPersistedPositionMs[video.videoId] =
+            lastPosition ?? video.duration?.inMilliseconds ?? 0;
         await _setSessionActive(true);
         if (lastState == 'playing') {
           await globalAudioPlayer.play();
@@ -740,17 +748,73 @@ class DownloadService {
     final prefs = await SharedPreferences.getInstance();
     final current = globalPlayingNotifier.value;
     if (current != null) {
+      final positionMs = globalAudioPlayer.position.inMilliseconds;
       await prefs.setString(_lastVideoIdKey, current.videoId);
-      await prefs.setInt(
-        _lastVideoPositionKey,
-        globalAudioPlayer.position.inMilliseconds,
-      );
+      await prefs.setInt(_lastVideoPositionKey, positionMs);
       await prefs.setString(
         _lastVideoStateKey,
         globalAudioPlayer.playing ? 'playing' : 'paused',
       );
       await prefs.setBool(_sessionActiveKey, true);
+      if (current.isLocal) {
+        final lastPersisted =
+            _lastPersistedPositionMs[current.videoId] ??
+            -_positionPersistIntervalMs;
+        if ((positionMs - lastPersisted).abs() >= _positionPersistIntervalMs ||
+            !prefs.containsKey('audio_position_${current.videoId}')) {
+          await prefs.setInt('audio_position_${current.videoId}', positionMs);
+          _lastPersistedPositionMs[current.videoId] = positionMs;
+        }
+      }
     }
+  }
+
+  static Duration _clampPosition(Duration target, Duration? duration) {
+    if (target < Duration.zero) return Duration.zero;
+    if (duration != null && duration > Duration.zero && target > duration) {
+      return duration;
+    }
+    return target;
+  }
+
+  static Future<Duration?> seekRelative(Duration offset) async {
+    ensureInitialized();
+    final position = globalAudioPlayer.position;
+    final duration = globalAudioPlayer.duration;
+    final target = _clampPosition(position + offset, duration);
+    if ((target - position).abs() < _seekDebounceEpsilon) {
+      return target;
+    }
+    return _enqueueSeek(target);
+  }
+
+  static Duration get skipInterval => _skipInterval;
+
+  static Future<Duration?> _enqueueSeek(Duration target) async {
+    if (_isSeekInFlight) {
+      _pendingSeekTarget = target;
+      return target;
+    }
+    _isSeekInFlight = true;
+    Duration? result = target;
+    try {
+      await globalAudioPlayer.seek(target);
+      final current = globalPlayingNotifier.value;
+      if (current != null) {
+        _lastPersistedPositionMs[current.videoId] = target.inMilliseconds;
+      }
+      await saveGlobalPlayerState();
+    } finally {
+      _isSeekInFlight = false;
+      final pending = _pendingSeekTarget;
+      if (pending != null && (pending - target).abs() >= _seekDebounceEpsilon) {
+        _pendingSeekTarget = null;
+        result = await _enqueueSeek(pending);
+      } else {
+        _pendingSeekTarget = null;
+      }
+    }
+    return result;
   }
 
   static Future<void> playOrPause(
@@ -814,6 +878,7 @@ class DownloadService {
       filePath: filePath,
       isLocal: true,
     );
+    _lastPersistedPositionMs[videoId] = 0;
     globalPlayingNotifier.value = playing;
     await _setSessionActive(true);
     await globalAudioPlayer.play();
@@ -856,8 +921,9 @@ class DownloadService {
           album: 'YouTube Audio',
           title: title ?? 'Audio',
           artist: channelName ?? '',
-          artUri:
-              thumbnailUrl != null && thumbnailUrl.isNotEmpty ? Uri.parse(thumbnailUrl) : null,
+          artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
+              ? Uri.parse(thumbnailUrl)
+              : null,
         ),
       ),
     );

@@ -230,11 +230,31 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                 ),
                                 child: ListTile(
                                   leading: video.thumbnailUrl.isNotEmpty
-                                      ? Image.network(
-                                          video.thumbnailUrl,
-                                          width: 56,
-                                          height: 56,
-                                          fit: BoxFit.cover,
+                                      ? ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          child: Image.network(
+                                            video.thumbnailUrl,
+                                            width: 56,
+                                            height: 56,
+                                            fit: BoxFit.cover,
+                                            errorBuilder:
+                                                (
+                                                  context,
+                                                  error,
+                                                  stackTrace,
+                                                ) => Container(
+                                                  width: 56,
+                                                  height: 56,
+                                                  color: Colors.grey.shade300,
+                                                  alignment: Alignment.center,
+                                                  child: Icon(
+                                                    Icons.music_note,
+                                                    color: Colors.grey[600],
+                                                  ),
+                                                ),
+                                          ),
                                         )
                                       : Icon(Icons.music_note, size: 56),
                                   title: Column(
@@ -518,11 +538,21 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
         }
         return ListTile(
           leading: video.thumbnailUrl.isNotEmpty
-              ? Image.network(
-                  video.thumbnailUrl,
-                  width: 56,
-                  height: 56,
-                  fit: BoxFit.cover,
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.network(
+                    video.thumbnailUrl,
+                    width: 56,
+                    height: 56,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Container(
+                      width: 56,
+                      height: 56,
+                      color: Colors.grey.shade300,
+                      alignment: Alignment.center,
+                      child: Icon(Icons.music_note, color: Colors.grey[600]),
+                    ),
+                  ),
                 )
               : Icon(Icons.music_note, size: 56),
           title: Column(
@@ -559,9 +589,16 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
                     );
                     return;
                   }
-                  final prefs = await SharedPreferences.getInstance();
-                  final lastPos =
-                      prefs.getInt('audio_position_${video.videoId}') ?? 0;
+                  final current = DownloadService.globalPlayingNotifier.value;
+                  final wasAlreadyLoaded =
+                      current?.videoId == video.videoId &&
+                      (current?.isLocal ?? false);
+                  int lastPos = 0;
+                  if (!wasAlreadyLoaded) {
+                    final prefs = await SharedPreferences.getInstance();
+                    lastPos =
+                        prefs.getInt('audio_position_${video.videoId}') ?? 0;
+                  }
                   await DownloadService.playOrPause(
                     video.videoId,
                     video.filePath,
@@ -569,7 +606,7 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
                     channelName: video.channelName,
                     thumbnailUrl: video.thumbnailUrl,
                   );
-                  if (lastPos > 0) {
+                  if (!wasAlreadyLoaded && lastPos > 0) {
                     await DownloadService.globalAudioPlayer.seek(
                       Duration(milliseconds: lastPos),
                     );
@@ -591,9 +628,16 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
               );
               return;
             }
-            final prefs = await SharedPreferences.getInstance();
-            final lastPos =
-                prefs.getInt('audio_position_${video.videoId}') ?? 0;
+            final current = DownloadService.globalPlayingNotifier.value;
+            final wasAlreadyLoaded =
+                current?.videoId == video.videoId &&
+                (current?.isLocal ?? false);
+            int lastPos = 0;
+            if (!wasAlreadyLoaded) {
+              final prefs = await SharedPreferences.getInstance();
+              lastPos =
+                  prefs.getInt('audio_position_${video.videoId}') ?? 0;
+            }
             await DownloadService.playOrPause(
               video.videoId,
               video.filePath,
@@ -601,7 +645,7 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
               channelName: video.channelName,
               thumbnailUrl: video.thumbnailUrl,
             );
-            if (lastPos > 0) {
+            if (!wasAlreadyLoaded && lastPos > 0) {
               await DownloadService.globalAudioPlayer.seek(
                 Duration(milliseconds: lastPos),
               );
