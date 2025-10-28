@@ -1,10 +1,12 @@
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:youtube_explode_dart/youtube_explode_dart.dart' as yt;
 
 import '../config/app_config.dart';
+import '../core/fetch_exception.dart';
 import '../models/channel.dart';
 import '../models/video.dart';
 import '../utils/rss_parser.dart';
@@ -21,14 +23,54 @@ class YouTubeService {
 
   /// YouTube channel RSS feed fetch used for syncing videos.
   @pragma('vm:entry-point')
-  static Future<List<Video>> fetchChannelVideos(String channelId) async {
-    final url =
-        'https://www.youtube.com/feeds/videos.xml?channel_id=$channelId';
-    final response = await http.get(Uri.parse(url));
-    if (response.statusCode == 200) {
-      return parseRssFeed(response.body);
-    } else {
-      throw Exception('Failed to load RSS feed');
+  static Future<List<Video>> fetchChannelVideos(
+    String channelId, {
+    bool forceRefresh = false,
+  }) async {
+    final queryParams = <String, String>{'channel_id': channelId};
+    if (forceRefresh) {
+      queryParams['ts'] =
+          DateTime.now().millisecondsSinceEpoch.toString();
+    }
+
+    final uri = Uri.https(
+      'www.youtube.com',
+      '/feeds/videos.xml',
+      queryParams,
+    );
+
+    final headers = <String, String>{};
+    if (forceRefresh) {
+      headers['Cache-Control'] = 'no-cache';
+      headers['Pragma'] = 'no-cache';
+    }
+
+    try {
+      final response = await http.get(uri, headers: headers.isEmpty ? null : headers);
+      if (response.statusCode == 200) {
+        return parseRssFeed(response.body);
+      }
+      throw FetchException(
+        message: 'Failed to load RSS feed (HTTP ${response.statusCode})',
+      );
+    } on SocketException catch (e) {
+      throw FetchException(
+        message: 'No internet connection',
+        isOffline: true,
+        cause: e,
+      );
+    } on http.ClientException catch (e) {
+      throw FetchException(
+        message: 'Unable to reach YouTube right now.',
+        isOffline: true,
+        cause: e,
+      );
+    } catch (e) {
+      if (e is FetchException) rethrow;
+      throw FetchException(
+        message: 'Failed to load RSS feed',
+        cause: e,
+      );
     }
   }
 
