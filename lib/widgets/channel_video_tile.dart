@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:just_audio/just_audio.dart';
 
 import '../core/snackbar_bus.dart';
 import '../models/downloaded_video.dart';
@@ -36,9 +37,7 @@ Future<void> playVideo(BuildContext context, Video video) async {
       thumbnailUrl: video.thumbnailUrl,
     );
   } catch (e) {
-    showGlobalSnackBar(
-      SnackBar(content: Text('Failed to play audio: $e')),
-    );
+    showGlobalSnackBar(SnackBar(content: Text('Failed to play audio: $e')));
   }
 }
 
@@ -65,9 +64,7 @@ Future<void> downloadVideo(
       showGlobalSnackBarMessage('Download failed: ${video.title}');
     }
   } catch (e) {
-    showGlobalSnackBar(
-      SnackBar(content: Text('Download failed: $e')),
-    );
+    showGlobalSnackBar(SnackBar(content: Text('Download failed: $e')));
   }
 }
 
@@ -139,30 +136,42 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
 
   Future<void> _handlePlay() async {
     final video = widget.video;
-    final localPath = await DownloadService.getDownloadedFilePath(video.id);
-    if (localPath == null) {
-      final current = DownloadService.globalPlayingNotifier.value;
-      final shouldShowSpinner =
-          !(current?.videoId == video.id && !(current?.isLocal ?? true));
+    final current = DownloadService.globalPlayingNotifier.value;
+    final isCurrent = current?.videoId == video.id;
 
-      if (shouldShowSpinner && mounted) {
-        setState(() {
-          _isStreaming = true;
-        });
-      }
-
-      await playVideo(context, video);
-
-      if (!mounted) return;
-      if (shouldShowSpinner) {
-        setState(() {
-          _isStreaming = false;
-        });
+    if (isCurrent) {
+      try {
+        await DownloadService.togglePlayback();
+      } on FileSystemException {
+        showGlobalSnackBarMessage(
+          'Audio file not found. Stream or re-download to play.',
+        );
+        await DownloadService.clearPlaybackSession();
+        await _refreshDownloadedVideo();
+      } catch (e) {
+        showGlobalSnackBarMessage('Playback error: $e');
       }
       return;
     }
 
-    await playVideo(context, video);
+    final localPath = await DownloadService.getDownloadedFilePath(video.id);
+    final isLocal = localPath != null;
+
+    if (!isLocal && mounted) {
+      setState(() {
+        _isStreaming = true;
+      });
+    }
+
+    try {
+      await playVideo(context, video);
+    } finally {
+      if (!isLocal && mounted) {
+        setState(() {
+          _isStreaming = false;
+        });
+      }
+    }
   }
 
   Future<void> _startDownload() async {
@@ -314,109 +323,135 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
                     valueListenable: DownloadService.globalPlayingNotifier,
                     builder: (context, playing, _) {
                       final isSameVideo = playing?.videoId == video.id;
-                      final isThisPlaying =
-                          isSameVideo && (playing?.isPlaying ?? false);
-                      final playLabel = _isStreaming
-                          ? 'Loading...'
-                          : isThisPlaying
-                          ? 'Pause'
-                          : isSameVideo
-                          ? 'Resume'
-                          : isDownloaded
-                          ? 'Play Offline'
-                          : 'Play';
-                      final playIcon = isThisPlaying
-                          ? Icons.pause
-                          : Icons.play_arrow;
-
-                      final playButton = ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green[600],
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        onPressed: _isStreaming ? null : _handlePlay,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_isStreaming)
-                              const SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            else
-                              Icon(playIcon, color: Colors.white),
-                            const SizedBox(width: 6),
-                            Text(
-                              playLabel,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-
-                      final downloadButton = ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red[600],
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        onPressed: _startDownload,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: const [
-                            Icon(Icons.download, color: Colors.white),
-                            SizedBox(width: 6),
-                            Text(
-                              'Download',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-
-                      return LayoutBuilder(
-                        builder: (context, constraints) {
-                          final isCompact = constraints.maxWidth < 360;
-                          final showDownload = !isDownloaded;
-                          if (!showDownload) {
-                            return SizedBox(
-                              width: double.infinity,
-                              child: playButton,
-                            );
+                      return StreamBuilder<PlayerState>(
+                        stream:
+                            DownloadService.globalAudioPlayer.playerStateStream,
+                        builder: (context, snapshot) {
+                          final playerState = snapshot.data;
+                          final processingState =
+                              playerState?.processingState ??
+                              ProcessingState.idle;
+                          final isBuffering =
+                              isSameVideo &&
+                              (processingState == ProcessingState.loading ||
+                                  processingState == ProcessingState.buffering);
+                          bool isPlaying = false;
+                          if (isSameVideo) {
+                            if (playerState == null) {
+                              isPlaying = playing?.isPlaying ?? false;
+                            } else {
+                              isPlaying =
+                                  playerState.playing &&
+                                  processingState !=
+                                      ProcessingState.completed &&
+                                  processingState != ProcessingState.idle;
+                            }
                           }
-                          if (isCompact) {
-                            return Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                          final isLoading = _isStreaming || isBuffering;
+                          final playLabel = isLoading
+                              ? 'Loading...'
+                              : isPlaying
+                              ? 'Pause'
+                              : isSameVideo
+                              ? 'Resume'
+                              : isDownloaded
+                              ? 'Play Offline'
+                              : 'Play';
+                          final playIcon = isPlaying
+                              ? Icons.pause
+                              : Icons.play_arrow;
+
+                          final playButton = ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green[600],
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            onPressed: isLoading ? null : _handlePlay,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                playButton,
-                                const SizedBox(height: 8),
-                                downloadButton,
+                                if (isLoading)
+                                  const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                else
+                                  Icon(playIcon, color: Colors.white),
+                                const SizedBox(width: 6),
+                                Text(
+                                  playLabel,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ],
-                            );
-                          }
-                          return Row(
-                            children: [
-                              Expanded(child: playButton),
-                              const SizedBox(width: 8),
-                              Expanded(child: downloadButton),
-                            ],
+                            ),
+                          );
+
+                          final downloadButton = ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red[600],
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            onPressed: _startDownload,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              mainAxisSize: MainAxisSize.min,
+                              children: const [
+                                Icon(Icons.download, color: Colors.white),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Download',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+
+                          return LayoutBuilder(
+                            builder: (context, constraints) {
+                              final isCompact = constraints.maxWidth < 360;
+                              final showDownload = !isDownloaded;
+                              if (!showDownload) {
+                                return SizedBox(
+                                  width: double.infinity,
+                                  child: playButton,
+                                );
+                              }
+                              if (isCompact) {
+                                return Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    playButton,
+                                    const SizedBox(height: 8),
+                                    downloadButton,
+                                  ],
+                                );
+                              }
+                              return Row(
+                                children: [
+                                  Expanded(child: playButton),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: downloadButton),
+                                ],
+                              );
+                            },
                           );
                         },
                       );

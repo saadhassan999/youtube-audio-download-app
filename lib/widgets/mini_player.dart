@@ -3,7 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
 import '../services/download_service.dart';
 import 'audio_player_bottom_sheet.dart';
-import 'dart:io';
+import 'dart:io' show FileSystemException;
 import '../core/snackbar_bus.dart';
 
 class MiniPlayer extends StatefulWidget {
@@ -39,36 +39,16 @@ class _MiniPlayerState extends State<MiniPlayer> {
   }
 
   void _playPause() async {
-    final playing = _current;
-    if (playing == null) return;
+    if (_current == null) return;
 
-    if (playing.isLocal) {
-      final filePath = playing.filePath;
-      if (filePath == null) {
-        showGlobalSnackBarMessage('Audio file not found');
-        return;
-      }
-      final file = File(filePath);
-      if (!await file.exists()) {
-        showGlobalSnackBarMessage('Audio file not found');
-        return;
-      }
-
-      await DownloadService.playOrPause(
-        playing.videoId,
-        filePath,
-        title: playing.title,
-        channelName: playing.channelName,
-        thumbnailUrl: playing.thumbnailUrl,
+    try {
+      await DownloadService.togglePlayback();
+    } on FileSystemException {
+      showGlobalSnackBarMessage(
+        'File not found. Stream or re-download to play.',
       );
-    } else {
-      await DownloadService.playStream(
-        videoId: playing.videoId,
-        videoUrl: 'https://www.youtube.com/watch?v=${playing.videoId}',
-        title: playing.title,
-        channelName: playing.channelName,
-        thumbnailUrl: playing.thumbnailUrl,
-      );
+    } catch (e) {
+      showGlobalSnackBarMessage('Playback error: $e');
     }
   }
 

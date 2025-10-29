@@ -1,3 +1,5 @@
+import 'dart:io' show FileSystemException;
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import '../core/fetch_exception.dart';
@@ -15,6 +17,7 @@ import '../widgets/mini_player.dart';
 import '../widgets/channel_video_tile.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:async';
 
@@ -49,14 +52,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   Future<void> _initConnectivity() async {
     final connectivity = Connectivity();
     final initial = await connectivity.checkConnectivity();
-    _updateConnectivityStatus(
-      _isConnected(initial),
-      silent: true,
-    );
+    _updateConnectivityStatus(_isConnected(initial), silent: true);
     _connectivitySub = connectivity.onConnectivityChanged.listen(
-      (event) => _updateConnectivityStatus(
-        _isConnected(event),
-      ),
+      (event) => _updateConnectivityStatus(_isConnected(event)),
     );
   }
 
@@ -93,9 +91,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     );
     _initConnectivity();
     _loadChannels();
-    _savedVideosSub = VideoRepository.instance
-        .watchSavedVideos()
-        .listen((videos) {
+    _savedVideosSub = VideoRepository.instance.watchSavedVideos().listen((
+      videos,
+    ) {
       if (!mounted) return;
       setState(() {
         _savedVideos = videos;
@@ -156,9 +154,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     await _loadChannels();
     await _refreshChannel(channel.id, forceRefresh: true);
     if (!mounted) return;
-      showGlobalSnackBar(
-        SnackBar(content: Text('Channel added: ${channel.name}')),
-      );
+    showGlobalSnackBar(
+      SnackBar(content: Text('Channel added: ${channel.name}')),
+    );
   }
 
   void _synchronizeChannelStatesWithCache() {
@@ -194,10 +192,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     try {
       await Future.wait(
         _channels.map(
-          (channel) => _refreshChannel(
-            channel.id,
-            forceRefresh: forceRefresh,
-          ),
+          (channel) => _refreshChannel(channel.id, forceRefresh: forceRefresh),
         ),
       );
     } finally {
@@ -208,17 +203,11 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     }
   }
 
-  Future<void> _refreshChannel(
-    String channelId, {
-    bool forceRefresh = false,
-  }) {
+  Future<void> _refreshChannel(String channelId, {bool forceRefresh = false}) {
     final inFlight = _channelRefreshes[channelId];
     if (inFlight != null) return inFlight;
 
-    final future = _doRefreshChannel(
-      channelId,
-      forceRefresh: forceRefresh,
-    );
+    final future = _doRefreshChannel(channelId, forceRefresh: forceRefresh);
     _channelRefreshes[channelId] = future;
     return future.whenComplete(() {
       _channelRefreshes.remove(channelId);
@@ -229,7 +218,8 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     String channelId, {
     required bool forceRefresh,
   }) async {
-    final current = _channelStates[channelId] ??
+    final current =
+        _channelStates[channelId] ??
         const _ChannelSectionState(isLoadingInitial: true);
 
     final next = current.copyWith(
@@ -272,9 +262,11 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       } else {
         showGlobalSnackBar(
           SnackBar(
-            content: Text(e.message.isNotEmpty
-                ? e.message
-                : 'Failed to load videos. Please try again.'),
+            content: Text(
+              e.message.isNotEmpty
+                  ? e.message
+                  : 'Failed to load videos. Please try again.',
+            ),
           ),
         );
       }
@@ -287,9 +279,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       );
       _setChannelState(channelId, updated);
       showGlobalSnackBar(
-        SnackBar(
-          content: Text('Failed to load videos. Please try again.'),
-        ),
+        SnackBar(content: Text('Failed to load videos. Please try again.')),
       );
     }
   }
@@ -311,24 +301,18 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
             'Saved Videos',
-            style: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.w600,
-            ),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
           ),
         ),
       ),
       SliverList(
-        delegate: SliverChildBuilderDelegate(
-          (context, index) {
-            final saved = _savedVideos[index];
-            return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: SavedVideoTile(savedVideo: saved),
-            );
-          },
-          childCount: _savedVideos.length,
-        ),
+        delegate: SliverChildBuilderDelegate((context, index) {
+          final saved = _savedVideos[index];
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: SavedVideoTile(savedVideo: saved),
+          );
+        }, childCount: _savedVideos.length),
       ),
       const SliverToBoxAdapter(child: SizedBox(height: 16)),
     ];
@@ -441,8 +425,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
             child: CustomScrollView(
               controller: _scroll,
               physics: const AlwaysScrollableScrollPhysics(),
-              keyboardDismissBehavior:
-                  ScrollViewKeyboardDismissBehavior.onDrag,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               slivers: [
                 SliverAppBar(
                   pinned: true,
@@ -518,7 +501,8 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                     itemCount: _channels.length,
                     itemBuilder: (context, i) {
                       final channel = _channels[i];
-                      final state = _channelStates[channel.id] ??
+                      final state =
+                          _channelStates[channel.id] ??
                           const _ChannelSectionState(isLoadingInitial: true);
                       final videos = state.videos;
                       final isInitialLoading =
@@ -549,14 +533,17 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                             title: Row(
                               children: [
                                 CircleAvatar(
-                                  backgroundImage: channel.thumbnailUrl.isNotEmpty
+                                  backgroundImage:
+                                      channel.thumbnailUrl.isNotEmpty
                                       ? NetworkImage(channel.thumbnailUrl)
                                       : null,
                                   backgroundColor: Colors.red[100],
                                   radius: 20,
                                   child: channel.thumbnailUrl.isEmpty
-                                      ? Icon(Icons.person,
-                                          color: Colors.red[700])
+                                      ? Icon(
+                                          Icons.person,
+                                          color: Colors.red[700],
+                                        )
                                       : null,
                                 ),
                                 const SizedBox(width: 12),
@@ -581,9 +568,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                   onPressed: inlineBusy
                                       ? null
                                       : () => _refreshChannel(
-                                            channel.id,
-                                            forceRefresh: true,
-                                          ),
+                                          channel.id,
+                                          forceRefresh: true,
+                                        ),
                                 ),
                                 IconButton(
                                   icon: const Icon(Icons.delete_outline),
@@ -598,17 +585,14 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                         ),
                                         actions: [
                                           TextButton(
-                                            onPressed: () =>
-                                                Navigator.of(context).pop(
-                                                  false,
-                                                ),
+                                            onPressed: () => Navigator.of(
+                                              context,
+                                            ).pop(false),
                                             child: const Text('Cancel'),
                                           ),
                                           TextButton(
                                             onPressed: () =>
-                                                Navigator.of(context).pop(
-                                                  true,
-                                                ),
+                                                Navigator.of(context).pop(true),
                                             child: const Text('Yes'),
                                           ),
                                         ],
@@ -672,8 +656,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                               else ...[
                                 if (state.isRefreshing)
                                   const Padding(
-                                    padding:
-                                        EdgeInsets.symmetric(vertical: 8),
+                                    padding: EdgeInsets.symmetric(vertical: 8),
                                     child: Center(
                                       child: SizedBox(
                                         width: 18,
@@ -711,17 +694,17 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                           onPressed: inlineBusy
                                               ? null
                                               : () => _refreshChannel(
-                                                    channel.id,
-                                                    forceRefresh: true,
-                                                  ),
+                                                  channel.id,
+                                                  forceRefresh: true,
+                                                ),
                                           child: inlineBusy
                                               ? const SizedBox(
                                                   width: 16,
                                                   height: 16,
                                                   child:
                                                       CircularProgressIndicator(
-                                                    strokeWidth: 2,
-                                                  ),
+                                                        strokeWidth: 2,
+                                                      ),
                                                 )
                                               : const Text('Retry'),
                                         ),
@@ -730,8 +713,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                   ),
                                 ListView.separated(
                                   shrinkWrap: true,
-                                  physics:
-                                      const NeverScrollableScrollPhysics(),
+                                  physics: const NeverScrollableScrollPhysics(),
                                   separatorBuilder: (_, __) => Divider(
                                     height: 1,
                                     color: Colors.grey[200],
@@ -867,14 +849,14 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
   }
 
   Video get _video => Video(
-        id: widget.savedVideo.videoId,
-        title: widget.savedVideo.title,
-        published: widget.savedVideo.publishedAt?.toUtc() ?? DateTime.now().toUtc(),
-        thumbnailUrl: widget.savedVideo.thumbnailUrl,
-        channelName: widget.savedVideo.channelTitle,
-        channelId: widget.savedVideo.channelId,
-        duration: widget.savedVideo.duration,
-      );
+    id: widget.savedVideo.videoId,
+    title: widget.savedVideo.title,
+    published: widget.savedVideo.publishedAt?.toUtc() ?? DateTime.now().toUtc(),
+    thumbnailUrl: widget.savedVideo.thumbnailUrl,
+    channelName: widget.savedVideo.channelTitle,
+    channelId: widget.savedVideo.channelId,
+    duration: widget.savedVideo.duration,
+  );
 
   bool get _isDownloaded => widget.savedVideo.status == 'downloaded';
   bool get _isDownloadingStatus => widget.savedVideo.status == 'downloading';
@@ -963,16 +945,67 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
             Row(
               children: [
                 Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _handlePlay,
-                    icon: _isStreaming
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.play_arrow),
-                    label: const Text('Play'),
+                  child: ValueListenableBuilder<PlayingAudio?>(
+                    valueListenable: DownloadService.globalPlayingNotifier,
+                    builder: (context, playing, _) {
+                      final isSameVideo =
+                          playing?.videoId == widget.savedVideo.videoId;
+                      return StreamBuilder<PlayerState>(
+                        stream:
+                            DownloadService.globalAudioPlayer.playerStateStream,
+                        builder: (context, snapshot) {
+                          final playerState = snapshot.data;
+                          final processingState =
+                              playerState?.processingState ??
+                              ProcessingState.idle;
+                          final isBuffering =
+                              isSameVideo &&
+                              (processingState == ProcessingState.loading ||
+                                  processingState == ProcessingState.buffering);
+                          bool isPlaying = false;
+                          if (isSameVideo) {
+                            if (playerState == null) {
+                              isPlaying = playing?.isPlaying ?? false;
+                            } else {
+                              isPlaying =
+                                  playerState.playing &&
+                                  processingState !=
+                                      ProcessingState.completed &&
+                                  processingState != ProcessingState.idle;
+                            }
+                          }
+                          final isLoading = _isStreaming || isBuffering;
+                          final label = isLoading
+                              ? 'Loading...'
+                              : isPlaying
+                              ? 'Pause'
+                              : isSameVideo
+                              ? 'Resume'
+                              : _isDownloaded
+                              ? 'Play Offline'
+                              : 'Play';
+
+                          final icon = isLoading
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Icon(
+                                  isPlaying ? Icons.pause : Icons.play_arrow,
+                                );
+
+                          return ElevatedButton.icon(
+                            onPressed: isLoading ? null : _handlePlay,
+                            icon: icon,
+                            label: Text(label),
+                          );
+                        },
+                      );
+                    },
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -1014,26 +1047,44 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
   }
 
   Future<void> _handlePlay() async {
-    final localPath = await DownloadService.getDownloadedFilePath(
-      widget.savedVideo.videoId,
-    );
-    if (localPath == null) {
-      final current = DownloadService.globalPlayingNotifier.value;
-      final shouldShowSpinner =
-          !(current?.videoId == widget.savedVideo.videoId &&
-              !(current?.isLocal ?? true));
-      if (shouldShowSpinner && mounted) {
-        setState(() => _isStreaming = true);
-      }
-      await playVideo(context, _video);
-      if (!mounted) return;
-      if (shouldShowSpinner) {
-        setState(() => _isStreaming = false);
+    final current = DownloadService.globalPlayingNotifier.value;
+    final isCurrent = current?.videoId == widget.savedVideo.videoId;
+
+    if (isCurrent) {
+      try {
+        await DownloadService.togglePlayback();
+      } on FileSystemException {
+        showGlobalSnackBarMessage(
+          'Audio file not found. Stream or re-download to play.',
+        );
+        await DownloadService.clearPlaybackSession();
+        if (mounted) {
+          setState(() {
+            _isStreaming = false;
+          });
+        }
+      } catch (e) {
+        showGlobalSnackBarMessage('Playback error: $e');
       }
       return;
     }
 
-    await playVideo(context, _video);
+    final localPath = await DownloadService.getDownloadedFilePath(
+      widget.savedVideo.videoId,
+    );
+    final isLocal = localPath != null;
+
+    if (!isLocal && mounted) {
+      setState(() => _isStreaming = true);
+    }
+
+    try {
+      await playVideo(context, _video);
+    } finally {
+      if (!isLocal && mounted) {
+        setState(() => _isStreaming = false);
+      }
+    }
   }
 
   Widget _buildRemoveButton() {
@@ -1060,12 +1111,12 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
       if (_isDownloadingStatus) {
         await DownloadService.cancelDownload(widget.savedVideo.videoId);
       }
-      await VideoRepository.instance.removeSavedVideo(widget.savedVideo.videoId);
+      await VideoRepository.instance.removeSavedVideo(
+        widget.savedVideo.videoId,
+      );
       showGlobalSnackBarMessage('Removed saved video');
     } catch (e) {
-      showGlobalSnackBar(
-        SnackBar(content: Text('Failed to remove video: $e')),
-      );
+      showGlobalSnackBar(SnackBar(content: Text('Failed to remove video: $e')));
     } finally {
       if (mounted) {
         setState(() => _isRemoving = false);
@@ -1103,8 +1154,10 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                   right: 4,
                   bottom: 4,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.6),
                       borderRadius: BorderRadius.circular(4),

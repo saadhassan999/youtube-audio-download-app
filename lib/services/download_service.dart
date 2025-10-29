@@ -10,6 +10,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/snackbar_bus.dart';
 import '../models/downloaded_video.dart';
 import '../models/video.dart';
 import '../repositories/video_repository.dart';
@@ -99,6 +100,10 @@ class DownloadService {
     'download_foreground_service',
   );
   static bool _isForegroundServiceActive = false;
+
+  static void _log(String message) {
+    debugPrint('[DownloadService] $message');
+  }
 
   static int? _parseTotalFromContentRange(String? contentRange) {
     if (contentRange == null || contentRange.isEmpty) return null;
@@ -208,6 +213,24 @@ class DownloadService {
     globalPlayingNotifier.addListener(_updateMiniPlayerVisibility);
     globalAudioPlayer.playerStateStream.listen((state) {
       final current = globalPlayingNotifier.value;
+      _log(
+        'playerState update: processing=${state.processingState}, playing=${state.playing}',
+      );
+
+      if (state.processingState == ProcessingState.idle &&
+          current?.isLocal == true) {
+        final filePath = current?.filePath;
+        final missing = filePath == null || !File(filePath).existsSync();
+        if (missing) {
+          _log('missing local file detected for ${current?.videoId}');
+          showGlobalSnackBarMessage(
+            'File not found. Stream or re-download to play.',
+          );
+          unawaited(clearPlaybackSession());
+          return;
+        }
+      }
+
       if (state.processingState == ProcessingState.completed ||
           state.processingState == ProcessingState.idle) {
         globalPlayingNotifier.value = null;
@@ -899,6 +922,7 @@ class DownloadService {
 
     if (isSameLocal) {
       if (current?.isPlaying ?? false) {
+        _log('toggle pause (local) $videoId');
         await globalAudioPlayer.pause();
         globalPlayingNotifier.value = current!.copyWith(isPlaying: false);
         final prefs = await SharedPreferences.getInstance();
@@ -907,6 +931,7 @@ class DownloadService {
           globalAudioPlayer.position.inMilliseconds,
         );
       } else {
+        _log('toggle resume (local) $videoId');
         await globalAudioPlayer.play();
         globalPlayingNotifier.value = current!.copyWith(isPlaying: true);
       }
@@ -916,6 +941,7 @@ class DownloadService {
 
     await stopGlobalAudio();
 
+    _log('setAudioSource(local): $filePath');
     await globalAudioPlayer.setAudioSource(
       ConcatenatingAudioSource(
         children: [
@@ -950,6 +976,7 @@ class DownloadService {
     globalPlayingNotifier.value = playing;
     await _setSessionActive(true);
     await globalAudioPlayer.play();
+    _log('play local $videoId');
     await saveGlobalPlayerState();
   }
 
@@ -967,9 +994,11 @@ class DownloadService {
 
     if (isSameStream) {
       if (current?.isPlaying ?? false) {
+        _log('toggle pause (stream) $videoId');
         await globalAudioPlayer.pause();
         globalPlayingNotifier.value = current!.copyWith(isPlaying: false);
       } else {
+        _log('toggle resume (stream) $videoId');
         await globalAudioPlayer.play();
         globalPlayingNotifier.value = current!.copyWith(isPlaying: true);
       }
@@ -977,10 +1006,12 @@ class DownloadService {
       return;
     }
 
+    _log('prepare stream playback for $videoId');
     await stopGlobalAudio();
 
     final extracted = await _extractor.getBestAudio(videoUrl);
 
+    _log('setAudioSource(stream): ${extracted.url}');
     await globalAudioPlayer.setAudioSource(
       AudioSource.uri(
         Uri.parse(extracted.url),
@@ -1009,6 +1040,59 @@ class DownloadService {
     globalPlayingNotifier.value = playing;
     await _setSessionActive(true);
     await globalAudioPlayer.play();
+    _log('play stream $videoId');
+    await saveGlobalPlayerState();
+  }
+
+  static Future<void> togglePlayback() async {
+    ensureInitialized();
+    final playing = globalPlayingNotifier.value;
+    if (playing == null) {
+      _log('togglePlayback called with no active track');
+      return;
+    }
+
+    if (playing.isLocal) {
+      final filePath = playing.filePath;
+      if (filePath == null || filePath.isEmpty) {
+        _log('togglePlayback local path missing for ${playing.videoId}');
+        await clearPlaybackSession();
+        throw const FileSystemException('File not found');
+      }
+
+      final file = File(filePath);
+      if (!await file.exists()) {
+        _log('togglePlayback local file missing for ${playing.videoId}');
+        await clearPlaybackSession();
+        throw FileSystemException('File not found', filePath);
+      }
+
+      _log('togglePlayback delegating to playOrPause for ${playing.videoId}');
+      await playOrPause(
+        playing.videoId,
+        filePath,
+        title: playing.title,
+        channelName: playing.channelName,
+        thumbnailUrl: playing.thumbnailUrl,
+      );
+      return;
+    }
+
+    if (globalAudioPlayer.playing) {
+      _log('toggle pause (stream) ${playing.videoId}');
+      await globalAudioPlayer.pause();
+      final current = globalPlayingNotifier.value;
+      if (current != null) {
+        globalPlayingNotifier.value = current.copyWith(isPlaying: false);
+      }
+    } else {
+      _log('toggle resume (stream) ${playing.videoId}');
+      await globalAudioPlayer.play();
+      final current = globalPlayingNotifier.value;
+      if (current != null) {
+        globalPlayingNotifier.value = current.copyWith(isPlaying: true);
+      }
+    }
     await saveGlobalPlayerState();
   }
 

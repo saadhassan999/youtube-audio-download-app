@@ -26,36 +26,47 @@ class _AudioPlayerBottomSheetContent extends StatefulWidget {
 class _AudioPlayerBottomSheetContentState
     extends State<_AudioPlayerBottomSheetContent> {
   List<DownloadedVideo> _playlist = [];
-  DownloadedVideo? _currentVideo;
-  int _currentIndex = 0;
+  int _currentIndex = -1;
+  late final VoidCallback _playingListener;
 
   @override
   void initState() {
     super.initState();
+    _playingListener = _syncWithCurrentlyPlaying;
+    DownloadService.globalPlayingNotifier.addListener(_playingListener);
     _loadPlaylist();
-    _updateCurrentTrack();
+    _syncWithCurrentlyPlaying();
+  }
+
+  @override
+  void dispose() {
+    DownloadService.globalPlayingNotifier.removeListener(_playingListener);
+    super.dispose();
   }
 
   Future<void> _loadPlaylist() async {
     final playlist = await DatabaseService.instance.getDownloadedVideos();
+    if (!mounted) return;
+    final playing = DownloadService.globalPlayingNotifier.value;
+    final index = playing == null
+        ? -1
+        : playlist.indexWhere((video) => video.videoId == playing.videoId);
     setState(() {
       _playlist = playlist;
+      _currentIndex = index;
     });
-    _updateCurrentTrack();
   }
 
-  void _updateCurrentTrack() {
+  void _syncWithCurrentlyPlaying() {
+    if (!mounted) return;
     final playing = DownloadService.globalPlayingNotifier.value;
-    if (playing != null) {
-      final index = _playlist.indexWhere(
-        (video) => video.videoId == playing.videoId,
-      );
-      if (index != -1) {
-        setState(() {
-          _currentIndex = index;
-          _currentVideo = _playlist[index];
-        });
-      }
+    final index = playing == null
+        ? -1
+        : _playlist.indexWhere((video) => video.videoId == playing.videoId);
+    if (index != _currentIndex) {
+      setState(() {
+        _currentIndex = index;
+      });
     }
   }
 
@@ -75,10 +86,13 @@ class _AudioPlayerBottomSheetContentState
 
         setState(() {
           _currentIndex = newIndex;
-          _currentVideo = video;
         });
       } else {
         showGlobalSnackBarMessage('Audio file not found: ${video.title}');
+        await DownloadService.clearPlaybackSession();
+        setState(() {
+          _currentIndex = -1;
+        });
       }
     }
   }
@@ -103,11 +117,16 @@ class _AudioPlayerBottomSheetContentState
               ),
             ),
             // Audio controls
-            AudioControls(
-              currentVideo: _currentVideo,
-              playlist: _playlist,
-              currentIndex: _currentIndex,
-              onTrackChanged: _onTrackChanged,
+            ValueListenableBuilder<PlayingAudio?>(
+              valueListenable: DownloadService.globalPlayingNotifier,
+              builder: (context, playing, _) {
+                return AudioControls(
+                  playlist: _playlist,
+                  currentIndex: _currentIndex,
+                  onTrackChanged: _onTrackChanged,
+                  playing: playing,
+                );
+              },
             ),
           ],
         ),

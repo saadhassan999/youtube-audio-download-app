@@ -1,24 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/semantics.dart';
-import 'package:just_audio_background/just_audio_background.dart';
+import 'package:just_audio/just_audio.dart';
 import '../services/download_service.dart';
 import '../models/downloaded_video.dart';
-import 'dart:io';
+import 'dart:io' show FileSystemException;
 import '../core/snackbar_bus.dart';
 
 class AudioControls extends StatefulWidget {
-  final DownloadedVideo? currentVideo;
   final List<DownloadedVideo> playlist;
   final int currentIndex;
   final Function(int) onTrackChanged;
+  final PlayingAudio? playing;
 
   const AudioControls({
     Key? key,
-    this.currentVideo,
     required this.playlist,
     required this.currentIndex,
     required this.onTrackChanged,
+    this.playing,
   }) : super(key: key);
 
   @override
@@ -34,7 +34,6 @@ class _AudioControlsState extends State<AudioControls> {
   bool _isDragging = false;
   double _dragValue = 0.0;
   double _playbackSpeed = 1.0;
-  bool _showSpeedOptions = false;
 
   @override
   void initState() {
@@ -49,22 +48,18 @@ class _AudioControlsState extends State<AudioControls> {
     });
   }
 
-  void _playPause() async {
-    if (widget.currentVideo == null) return;
+  Future<void> _playPause() async {
+    if (widget.playing == null) return;
 
-    final file = File(widget.currentVideo!.filePath);
-    if (!await file.exists()) {
-      showGlobalSnackBarMessage('Audio file not found');
-      return;
+    try {
+      await DownloadService.togglePlayback();
+    } on FileSystemException {
+      showGlobalSnackBarMessage(
+        'File not found. Stream or re-download to play.',
+      );
+    } catch (e) {
+      showGlobalSnackBarMessage('Playback error: $e');
     }
-
-    await DownloadService.playOrPause(
-      widget.currentVideo!.videoId,
-      widget.currentVideo!.filePath,
-      title: widget.currentVideo!.title,
-      channelName: widget.currentVideo!.channelName,
-      thumbnailUrl: widget.currentVideo!.thumbnailUrl,
-    );
   }
 
   void _skipToPrevious() {
@@ -103,7 +98,6 @@ class _AudioControlsState extends State<AudioControls> {
     await DownloadService.globalAudioPlayer.setSpeed(speed);
     setState(() {
       _playbackSpeed = speed;
-      _showSpeedOptions = false;
     });
   }
 
@@ -130,6 +124,26 @@ class _AudioControlsState extends State<AudioControls> {
         Duration(seconds: 10),
       ),
     };
+    final playing = widget.playing;
+    final playlistVideo =
+        (widget.currentIndex >= 0 &&
+            widget.currentIndex < widget.playlist.length)
+        ? widget.playlist[widget.currentIndex]
+        : null;
+    final thumbnailUrl = () {
+      final fromPlaying = playing?.thumbnailUrl;
+      if (fromPlaying != null && fromPlaying.isNotEmpty) {
+        return fromPlaying;
+      }
+      final fromPlaylist = playlistVideo?.thumbnailUrl;
+      if (fromPlaylist != null && fromPlaylist.isNotEmpty) {
+        return fromPlaylist;
+      }
+      return '';
+    }();
+    final trackTitle = playing?.title ?? playlistVideo?.title ?? 'Now playing';
+    final trackChannel =
+        playing?.channelName ?? playlistVideo?.channelName ?? '';
 
     return Shortcuts(
       shortcuts: shortcuts,
@@ -172,15 +186,15 @@ class _AudioControlsState extends State<AudioControls> {
                 SizedBox(height: 16),
 
                 // Track info
-                if (widget.currentVideo != null) ...[
+                if (playing != null || playlistVideo != null) ...[
                   Row(
                     children: [
                       // Thumbnail
                       ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child: widget.currentVideo!.thumbnailUrl.isNotEmpty
+                        child: thumbnailUrl.isNotEmpty
                             ? Image.network(
-                                widget.currentVideo!.thumbnailUrl,
+                                thumbnailUrl,
                                 width: 60,
                                 height: 60,
                                 fit: BoxFit.cover,
@@ -212,7 +226,7 @@ class _AudioControlsState extends State<AudioControls> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              widget.currentVideo!.title,
+                              trackTitle,
                               style: TextStyle(
                                 fontWeight: FontWeight.w600,
                                 fontSize: 16,
@@ -222,7 +236,7 @@ class _AudioControlsState extends State<AudioControls> {
                             ),
                             SizedBox(height: 4),
                             Text(
-                              widget.currentVideo!.channelName,
+                              trackChannel,
                               style: TextStyle(
                                 color: Colors.grey[600],
                                 fontSize: 14,
@@ -371,15 +385,31 @@ class _AudioControlsState extends State<AudioControls> {
                                   ),
                                 ),
                                 // Play/Pause
-                                ValueListenableBuilder<PlayingAudio?>(
-                                  valueListenable:
-                                      DownloadService.globalPlayingNotifier,
-                                  builder: (context, playing, _) {
-                                    final isPlaying =
-                                        playing?.isPlaying ?? false;
-                                    final isCurrentTrack =
-                                        playing?.videoId ==
-                                        widget.currentVideo?.videoId;
+                                StreamBuilder<PlayerState>(
+                                  stream: DownloadService
+                                      .globalAudioPlayer
+                                      .playerStateStream,
+                                  builder: (context, snapshot) {
+                                    final state = snapshot.data;
+                                    final processingState =
+                                        state?.processingState ??
+                                        ProcessingState.idle;
+                                    final isBuffering =
+                                        processingState ==
+                                            ProcessingState.loading ||
+                                        processingState ==
+                                            ProcessingState.buffering;
+                                    final isPlaying = state?.playing ?? false;
+                                    final showPause =
+                                        isPlaying &&
+                                        processingState !=
+                                            ProcessingState.completed &&
+                                        processingState != ProcessingState.idle;
+                                    final isDisabled =
+                                        playing == null || isBuffering;
+                                    final icon = showPause
+                                        ? Icons.pause
+                                        : Icons.play_arrow;
 
                                     return Container(
                                       decoration: BoxDecoration(
@@ -387,14 +417,26 @@ class _AudioControlsState extends State<AudioControls> {
                                         shape: BoxShape.circle,
                                       ),
                                       child: IconButton(
-                                        onPressed: _playPause,
-                                        icon: Icon(
-                                          (isPlaying && isCurrentTrack)
-                                              ? Icons.pause
-                                              : Icons.play_arrow,
-                                          size: 32,
-                                          color: Colors.white,
-                                        ),
+                                        onPressed: isDisabled
+                                            ? null
+                                            : _playPause,
+                                        icon: isBuffering
+                                            ? const SizedBox(
+                                                width: 24,
+                                                height: 24,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  valueColor:
+                                                      AlwaysStoppedAnimation<
+                                                        Color
+                                                      >(Colors.white),
+                                                ),
+                                              )
+                                            : Icon(
+                                                icon,
+                                                size: 32,
+                                                color: Colors.white,
+                                              ),
                                       ),
                                     );
                                   },
@@ -440,7 +482,7 @@ class _AudioControlsState extends State<AudioControls> {
                 SizedBox(height: 8),
 
                 // Playlist info
-                if (widget.playlist.isNotEmpty) ...[
+                if (widget.playlist.isNotEmpty && widget.currentIndex >= 0) ...[
                   Container(
                     padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
