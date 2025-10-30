@@ -10,8 +10,10 @@ import '../models/saved_video.dart';
 import '../models/downloaded_video.dart';
 import '../repositories/channel_repository.dart';
 import '../repositories/video_repository.dart';
+import '../config/app_config.dart';
 import '../services/database_service.dart';
 import '../services/download_service.dart';
+import '../services/youtube_api_service.dart';
 import '../utils/youtube_utils.dart';
 import '../widgets/channel_search_field.dart';
 import '../widgets/mini_player.dart';
@@ -19,6 +21,7 @@ import '../widgets/channel_video_tile.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
 import '../theme/theme_notifier.dart';
+import '../controllers/channel_uploads_controller.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:async';
@@ -37,6 +40,10 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   final ChannelRepository _channelRepository = ChannelRepository.instance;
   final Map<String, _ChannelSectionState> _channelStates = {};
   final Map<String, Future<void>> _channelRefreshes = {};
+  final Map<String, ChannelUploadsController> _controllers = {};
+  late final YoutubeApiService _ytService = YoutubeApiService(
+    AppConfig.youtubeApiKey,
+  );
   List<Channel> _channels = [];
   List<SavedVideo> _savedVideos = [];
   bool _isRefreshingAll = false;
@@ -180,6 +187,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     _connectivitySub?.cancel();
     _savedVideosSub?.cancel();
     _logoController.dispose();
+    for (final controller in _controllers.values) {
+      controller.dispose();
+    }
     _scroll.dispose();
     super.dispose();
   }
@@ -189,15 +199,15 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     if (!mounted) return;
     setState(() {
       _channels = channels;
-      _synchronizeChannelStatesWithCache();
     });
 
-    for (final channel in channels) {
-      final current = _channelStates[channel.id];
-      if (current == null || current.videos.isEmpty) {
-        unawaited(_refreshChannel(channel.id));
+    _controllers.removeWhere((key, controller) {
+      final remove = channels.every((channel) => channel.id != key);
+      if (remove) {
+        controller.dispose();
       }
-    }
+      return remove;
+    });
   }
 
   Future<void> _addChannel(String urlOrId) async {
@@ -281,81 +291,20 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     final inFlight = _channelRefreshes[channelId];
     if (inFlight != null) return inFlight;
 
-    final future = _doRefreshChannel(channelId, forceRefresh: forceRefresh);
+    final controller = _controllers.putIfAbsent(
+      channelId,
+      () => ChannelUploadsController(api: _ytService, channelId: channelId),
+    );
+
+    final future = () async {
+      controller.reset();
+      await controller.ensureInitialized();
+    }();
+
     _channelRefreshes[channelId] = future;
     return future.whenComplete(() {
       _channelRefreshes.remove(channelId);
     });
-  }
-
-  Future<void> _doRefreshChannel(
-    String channelId, {
-    required bool forceRefresh,
-  }) async {
-    final current =
-        _channelStates[channelId] ??
-        const _ChannelSectionState(isLoadingInitial: true);
-
-    final next = current.copyWith(
-      isLoadingInitial: current.videos.isEmpty,
-      isRefreshing: current.videos.isNotEmpty,
-      clearError: true,
-    );
-    _setChannelState(channelId, next);
-
-    try {
-      final result = await _channelRepository.fetchChannelVideos(
-        channelId,
-        forceRefresh: forceRefresh,
-      );
-      final updated = (_channelStates[channelId] ?? next).copyWith(
-        videos: result.videos,
-        isLoadingInitial: false,
-        isRefreshing: false,
-        isStale: false,
-        clearError: true,
-      );
-      _setChannelState(channelId, updated);
-    } on FetchException catch (e) {
-      final base = _channelStates[channelId] ?? current;
-      final updated = base.copyWith(
-        isLoadingInitial: false,
-        isRefreshing: false,
-        isStale: e.isOffline || base.isStale || base.videos.isEmpty,
-        lastError: e,
-      );
-      _setChannelState(channelId, updated);
-      if (e.isOffline) {
-        showGlobalSnackBar(
-          SnackBar(
-            content: Text(
-              'You\'re offline. Pull to refresh after reconnecting.',
-            ),
-          ),
-        );
-      } else {
-        showGlobalSnackBar(
-          SnackBar(
-            content: Text(
-              e.message.isNotEmpty
-                  ? e.message
-                  : 'Failed to load videos. Please try again.',
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      final base = _channelStates[channelId] ?? current;
-      final updated = base.copyWith(
-        isLoadingInitial: false,
-        isRefreshing: false,
-        lastError: FetchException(message: e.toString()),
-      );
-      _setChannelState(channelId, updated);
-      showGlobalSnackBar(
-        SnackBar(content: Text('Failed to load videos. Please try again.')),
-      );
-    }
   }
 
   void _setChannelState(String channelId, _ChannelSectionState state) {
@@ -583,236 +532,304 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                     itemCount: _channels.length,
                     itemBuilder: (context, i) {
                       final channel = _channels[i];
-                      final state =
-                          _channelStates[channel.id] ??
-                          const _ChannelSectionState(isLoadingInitial: true);
-                      final videos = state.videos;
-                      final isInitialLoading =
-                          state.isLoadingInitial && videos.isEmpty;
-                      final hasVideos = videos.isNotEmpty;
-                      final error = state.lastError;
-                      final bool inlineBusy =
-                          state.isRefreshing || _isRefreshingAll;
-                      final message = _describeChannelMessage(state, error);
+                      final controller = _controllers.putIfAbsent(
+                        channel.id,
+                        () => ChannelUploadsController(
+                          api: _ytService,
+                          channelId: channel.id,
+                        ),
+                      );
 
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        child: Card(
-                          elevation: 3,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          margin: EdgeInsets.zero,
-                          child: ExpansionTile(
-                            tilePadding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            childrenPadding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 8,
-                            ),
-                            title: Row(
-                              children: [
-                                CircleAvatar(
-                                  backgroundImage:
-                                      channel.thumbnailUrl.isNotEmpty
-                                      ? NetworkImage(channel.thumbnailUrl)
-                                      : null,
-                                  backgroundColor: Colors.red[100],
-                                  radius: 20,
-                                  child: channel.thumbnailUrl.isEmpty
-                                      ? Icon(
-                                          Icons.person,
-                                          color: Colors.red[700],
-                                        )
-                                      : null,
+                      return AnimatedBuilder(
+                        animation: controller,
+                        builder: (context, _) {
+                          final videos = controller.videos;
+                          final bool isInitialLoading =
+                              controller.isInitializing && videos.isEmpty;
+                          final bool hasVideos = videos.isNotEmpty;
+                          final bool inlineBusy =
+                              controller.isInitializing ||
+                              controller.isLoadingMore ||
+                              _isRefreshingAll;
+                          final error = controller.error;
+                          final String? errorMessage = error != null
+                              ? error.toString()
+                              : null;
+
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Card(
+                              elevation: 3,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              margin: EdgeInsets.zero,
+                              child: ExpansionTile(
+                                tilePadding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 8,
                                 ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    channel.name,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 18,
+                                childrenPadding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 8,
+                                ),
+                                onExpansionChanged: (open) {
+                                  if (open) {
+                                    controller.ensureInitialized();
+                                  } else {
+                                    controller.reset();
+                                  }
+                                },
+                                title: Row(
+                                  children: [
+                                    CircleAvatar(
+                                      backgroundImage:
+                                          channel.thumbnailUrl.isNotEmpty
+                                          ? NetworkImage(channel.thumbnailUrl)
+                                          : null,
+                                      backgroundColor: Colors.red[100],
+                                      radius: 20,
+                                      child: channel.thumbnailUrl.isEmpty
+                                          ? Icon(
+                                              Icons.person,
+                                              color: Colors.red[700],
+                                            )
+                                          : null,
                                     ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  icon: const Icon(Icons.refresh),
-                                  tooltip: 'Refresh',
-                                  onPressed: inlineBusy
-                                      ? null
-                                      : () => _refreshChannel(
-                                          channel.id,
-                                          forceRefresh: true,
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Text(
+                                        channel.name,
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 18,
                                         ),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.delete_outline),
-                                  tooltip: 'Remove Channel',
-                                  onPressed: () async {
-                                    final confirm = await showDialog<bool>(
-                                      context: context,
-                                      builder: (context) => AlertDialog(
-                                        title: const Text('Remove Channel'),
-                                        content: const Text(
-                                          'Are you sure you want to remove this channel?',
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () => Navigator.of(
-                                              context,
-                                            ).pop(false),
-                                            child: const Text('Cancel'),
-                                          ),
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.of(context).pop(true),
-                                            child: const Text('Yes'),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                    if (confirm == true) {
-                                      await DatabaseService.instance
-                                          .deleteChannel(channel.id);
-                                      setState(() {
-                                        _channelStates.remove(channel.id);
-                                      });
-                                      await _loadChannels();
-                                      if (!mounted) return;
-                                      showGlobalSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'Channel removed: ${channel.name}',
-                                          ),
-                                        ),
-                                      );
-                                    }
-                                  },
-                                ),
-                              ],
-                            ),
-                            children: [
-                              if (isInitialLoading)
-                                const Padding(
-                                  padding: EdgeInsets.all(16),
-                                  child: Center(
-                                    child: CircularProgressIndicator(),
-                                  ),
-                                )
-                              else if (!hasVideos)
-                                Padding(
-                                  padding: const EdgeInsets.all(16),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        message,
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: Colors.grey[700],
-                                        ),
-                                      ),
-                                      if (error != null || state.isStale)
-                                        const SizedBox(height: 12),
-                                      if (error != null || state.isStale)
-                                        _buildInlineActionButton(
-                                          label: 'Retry',
-                                          isBusy: inlineBusy,
-                                          onPressed: () => _refreshChannel(
-                                            channel.id,
-                                            forceRefresh: true,
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                )
-                              else ...[
-                                if (state.isRefreshing)
-                                  const Padding(
-                                    padding: EdgeInsets.symmetric(vertical: 8),
-                                    child: Center(
-                                      child: SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
+                                        overflow: TextOverflow.ellipsis,
                                       ),
                                     ),
-                                  ),
-                                if (state.isStale || error != null)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 8,
+                                  ],
+                                ),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.refresh),
+                                      tooltip: 'Refresh',
+                                      onPressed: inlineBusy
+                                          ? null
+                                          : () => _refreshChannel(
+                                              channel.id,
+                                              forceRefresh: true,
+                                            ),
                                     ),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          error?.isOffline ?? false
-                                              ? Icons.wifi_off
-                                              : Icons.info_outline,
-                                          color: Colors.orange.shade700,
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: Text(
-                                            message,
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline),
+                                      tooltip: 'Remove Channel',
+                                      onPressed: () async {
+                                        final confirm = await showDialog<bool>(
+                                          context: context,
+                                          builder: (context) => AlertDialog(
+                                            title: const Text('Remove Channel'),
+                                            content: const Text(
+                                              'Are you sure you want to remove this channel?',
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  context,
+                                                ).pop(false),
+                                                child: const Text('Cancel'),
+                                              ),
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  context,
+                                                ).pop(true),
+                                                child: const Text('Yes'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        if (confirm == true) {
+                                          await DatabaseService.instance
+                                              .deleteChannel(channel.id);
+                                          setState(() {
+                                            _controllers
+                                                .remove(channel.id)
+                                                ?.dispose();
+                                            _channelRefreshes
+                                                .remove(channel.id);
+                                          });
+                                          await _loadChannels();
+                                          if (!mounted) return;
+                                          showGlobalSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Channel removed: ${channel.name}',
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                      },
+                                    ),
+                                  ],
+                                ),
+                                children: [
+                                  if (isInitialLoading)
+                                    const Padding(
+                                      padding: EdgeInsets.all(16),
+                                      child: Center(
+                                        child: CircularProgressIndicator(),
+                                      ),
+                                    )
+                                  else if (!hasVideos)
+                                    Padding(
+                                      padding: const EdgeInsets.all(16),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            errorMessage ??
+                                                'No videos available yet.',
+                                            textAlign: TextAlign.center,
                                             style: TextStyle(
-                                              color: Colors.orange.shade700,
+                                              color: Colors.grey[700],
                                             ),
                                           ),
-                                        ),
-                                        TextButton(
-                                          onPressed: inlineBusy
-                                              ? null
-                                              : () => _refreshChannel(
-                                                  channel.id,
-                                                  forceRefresh: true,
+                                          if (errorMessage != null)
+                                            const SizedBox(height: 12),
+                                          if (errorMessage != null)
+                                            _buildInlineActionButton(
+                                              label: 'Retry',
+                                              isBusy: inlineBusy,
+                                              onPressed: inlineBusy
+                                                  ? null
+                                                  : () => _refreshChannel(
+                                                      channel.id,
+                                                      forceRefresh: true,
+                                                    ),
+                                            ),
+                                        ],
+                                      ),
+                                    )
+                                  else
+                                    Column(
+                                      children: [
+                                        NotificationListener<
+                                          ScrollNotification
+                                        >(
+                                          onNotification: (notification) {
+                                            if (notification
+                                                    is ScrollUpdateNotification &&
+                                                controller.hasMore &&
+                                                !controller.isLoadingMore &&
+                                                controller.error == null &&
+                                                notification.metrics.pixels >=
+                                                    notification
+                                                            .metrics
+                                                            .maxScrollExtent -
+                                                        400) {
+                                              controller.loadNextPage();
+                                            }
+                                            return false;
+                                          },
+                                          child: ListView.separated(
+                                            shrinkWrap: true,
+                                            physics:
+                                                const NeverScrollableScrollPhysics(),
+                                            separatorBuilder: (_, __) =>
+                                                Divider(
+                                                  height: 1,
+                                                  color: Colors.grey[200],
                                                 ),
-                                          child: inlineBusy
-                                              ? const SizedBox(
-                                                  width: 16,
-                                                  height: 16,
-                                                  child:
-                                                      CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                      ),
-                                                )
-                                              : const Text('Retry'),
+                                            itemCount: videos.length,
+                                            itemBuilder: (context, j) {
+                                              final item = videos[j];
+                                              final convertedVideo = Video(
+                                                id: item.videoId,
+                                                title: item.title,
+                                                published: item.publishedAt,
+                                                thumbnailUrl:
+                                                    item.thumbnailUrl ?? '',
+                                                channelName: channel.name,
+                                                channelId: item.channelId,
+                                              );
+                                              return ChannelVideoTile(
+                                                key: ValueKey(item.videoId),
+                                                video: convertedVideo,
+                                              );
+                                            },
+                                          ),
                                         ),
+                                        if (controller.isLoadingMore)
+                                          const Padding(
+                                            padding: EdgeInsets.symmetric(
+                                              vertical: 12,
+                                            ),
+                                            child: Center(
+                                              child: SizedBox(
+                                                width: 18,
+                                                height: 18,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                              ),
+                                            ),
+                                          )
+                                        else if (controller.error != null)
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 8,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  Icons.info_outline,
+                                                  color: Colors.orange.shade700,
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Expanded(
+                                                  child: Text(
+                                                    'Failed to load more videos.',
+                                                    style: TextStyle(
+                                                      color: Colors
+                                                          .orange
+                                                          .shade700,
+                                                    ),
+                                                  ),
+                                                ),
+                                                TextButton(
+                                                  onPressed: inlineBusy
+                                                      ? null
+                                                      : () => controller
+                                                            .loadNextPage(),
+                                                  child: const Text('Retry'),
+                                                ),
+                                              ],
+                                            ),
+                                          )
+                                        else if (controller.hasMore)
+                                          Padding(
+                                            padding: const EdgeInsets.only(
+                                              top: 8,
+                                              bottom: 4,
+                                            ),
+                                            child: TextButton(
+                                              onPressed: inlineBusy
+                                                  ? null
+                                                  : () => controller
+                                                        .loadNextPage(),
+                                              child: const Text('Load more'),
+                                            ),
+                                          ),
                                       ],
                                     ),
-                                  ),
-                                ListView.separated(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  separatorBuilder: (_, __) => Divider(
-                                    height: 1,
-                                    color: Colors.grey[200],
-                                  ),
-                                  itemCount: videos.length,
-                                  itemBuilder: (context, j) {
-                                    final video = videos[j];
-                                    return ChannelVideoTile(
-                                      key: ValueKey(video.id),
-                                      video: video,
-                                    );
-                                  },
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
                       );
                     },
                   ),

@@ -10,6 +10,7 @@ Easily manage your favorite channels, download audio for offline listening, and 
 - **Unified Search:** Look up YouTube channels *and* individual videos from the same search bar using names, URLs, or raw IDs.
 - **Saved Videos Hub:** Save any suggested video for quick access, stream instantly, download later, or remove it when you're done.
 - **Channel Management:** Add, search, and manage your favorite YouTube channels to keep new uploads in one place.
+- **Full Channel Browsing:** The channel view now pulls uploads straight from the YouTube Data API v3 with automatic pagination—scroll to keep loading 50 videos at a time until you hit the back catalogue.
 - **Audio Download:** Download audio from YouTube videos for offline playback with automatic retry and resume.
 - **Download Manager:** View real-time download progress, cancel downloads, and manage completed files.
 - **Audio Player:** Play downloaded audio with background playback, notification controls, and lock screen integration.
@@ -44,7 +45,13 @@ Easily manage your favorite channels, download audio for offline listening, and 
    flutter pub get
    ```
 
-3. **Run the app:**
+3. **Provide your YouTube Data API key (optional if already set in `lib/config/app_config.dart`):**
+   ```sh
+   flutter run --dart-define=YOUTUBE_API_KEY=YOUR_KEY_HERE
+   ```
+   > If you prefer hard-coding, update `AppConfig.youtubeApiKey` instead.
+
+4. **Run the app:**
    ```sh
    flutter run
    ```
@@ -60,7 +67,7 @@ Easily manage your favorite channels, download audio for offline listening, and 
    Use the search bar on the home screen to find channels or individual videos by name, URL, or ID. Tap a video to save it for later.
 
 2. **Add Channels:**  
-   When you tap a channel suggestion (or paste a channel link), it will be added to your channel list.
+   When you tap a channel suggestion (or paste a channel link), it will be added to your channel list. Opening a channel now streams uploads via the YouTube Data API and loads additional pages automatically as you scroll or tap **Load more**.
 
 3. **Saved Videos:**  
    The Saved Videos section collects every video you store from search. Stream immediately, download when you’re ready, or remove it with one tap. A small loading spinner appears while a remove/download action is in progress so you can see what’s happening.
