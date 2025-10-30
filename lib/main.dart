@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'screens/channel_management_screen.dart';
 import 'screens/download_manager_screen.dart';
 import 'screens/audio_player_screen.dart';
@@ -16,6 +17,8 @@ import 'dart:async';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'theme/app_theme.dart';
+import 'theme/theme_notifier.dart';
 
 const fetchTask = 'fetchNewVideosTask';
 
@@ -241,24 +244,36 @@ void main() async {
     );
   }
   await DownloadService.restoreGlobalPlayerState();
-  runApp(MyApp());
+  final themeNotifier = ThemeNotifier();
+  await themeNotifier.loadTheme();
+  runApp(
+    ChangeNotifierProvider.value(value: themeNotifier, child: const MyApp()),
+  );
 }
 
 class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'YT AudioBox',
-      theme: ThemeData(primarySwatch: Colors.red),
-      scaffoldMessengerKey: scaffoldMessengerKey,
-      home: ChannelManagementScreen(),
-      routes: {
-        '/home': (_) => ChannelManagementScreen(),
-        '/downloads': (_) => DownloadManagerScreen(),
-        '/player': (_) => AudioPlayerScreen(),
+    return Consumer<ThemeNotifier>(
+      builder: (context, notifier, _) {
+        return MaterialApp(
+          title: 'YT AudioBox',
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          themeMode: notifier.themeMode,
+          scaffoldMessengerKey: scaffoldMessengerKey,
+          home: const ChannelManagementScreen(),
+          routes: {
+            '/home': (_) => const ChannelManagementScreen(),
+            '/downloads': (_) => const DownloadManagerScreen(),
+            '/player': (_) => const AudioPlayerScreen(),
+          },
+          debugShowCheckedModeBanner: false,
+          navigatorObservers: [routeObserver],
+        );
       },
-      debugShowCheckedModeBanner: false,
-      navigatorObservers: [routeObserver],
     );
   }
 }

@@ -9,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/download_service.dart';
 
 class AudioPlayerScreen extends StatefulWidget {
+  const AudioPlayerScreen({super.key});
+
   @override
   _AudioPlayerScreenState createState() => _AudioPlayerScreenState();
 }
@@ -249,7 +251,18 @@ class _AudioPlayerScreenState extends State<AudioPlayerScreen>
         child: Focus(
           autofocus: true,
           child: Scaffold(
-            appBar: AppBar(title: Text(_audioFile!.title)),
+            backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+            appBar: AppBar(
+              title: Text(
+                _audioFile!.title,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurface,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              backgroundColor: Theme.of(context).colorScheme.surface,
+              foregroundColor: Theme.of(context).colorScheme.onSurface,
+            ),
             body: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Column(
@@ -257,7 +270,7 @@ class _AudioPlayerScreenState extends State<AudioPlayerScreen>
                 children: [
                   Text(
                     _audioFile!.channelName,
-                    style: const TextStyle(fontSize: 16),
+                    style: Theme.of(context).textTheme.bodyLarge,
                   ),
                   const SizedBox(height: 16),
                   StreamBuilder<Duration?>(

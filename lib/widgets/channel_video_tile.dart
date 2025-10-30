@@ -232,6 +232,11 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
     final status = downloaded?.status ?? '';
     final isDownloaded = status == 'completed';
     final isDownloading = status == 'downloading' || _isManualDownloading;
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final textTheme = theme.textTheme;
+    final placeholderColor = cs.surfaceVariant;
+    final onSurfaceMuted = cs.onSurface.withOpacity(0.7);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6.0, horizontal: 2.0),
@@ -246,8 +251,27 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
                     width: 80,
                     height: 45,
                     fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => Container(
+                      width: 80,
+                      height: 45,
+                      color: placeholderColor,
+                      alignment: Alignment.center,
+                      child: Icon(
+                        Icons.image_not_supported,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
                   )
-                : Container(width: 80, height: 45, color: Colors.grey[300]),
+                : Container(
+                    width: 80,
+                    height: 45,
+                    color: placeholderColor,
+                    alignment: Alignment.center,
+                    child: Icon(
+                      Icons.image,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -256,17 +280,25 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
               children: [
                 Text(
                   video.title,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
-                  ),
+                  style: textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: cs.onSurface,
+                      ) ??
+                      TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
+                        color: cs.onSurface,
+                      ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 4),
                 Text(
                   'Published: ${video.published.toLocal().toString().split(' ')[0]}',
-                  style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                  style: textTheme.bodySmall?.copyWith(
+                        color: onSurfaceMuted,
+                      ) ??
+                      TextStyle(fontSize: 12, color: onSurfaceMuted),
                 ),
                 const SizedBox(height: 6),
                 if (isDownloading)
@@ -291,6 +323,8 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
                                   ? normalized
                                   : null,
                               strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(cs.primary),
                             ),
                           ),
                           const SizedBox(width: 12),
@@ -361,13 +395,17 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
                               ? Icons.pause
                               : Icons.play_arrow;
 
-                          final playButton = ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.green[600],
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                          final buttonTextStyle = textTheme.labelLarge?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          );
+
+                          final playButton = FilledButton(
+                            style: FilledButton.styleFrom(
+                              backgroundColor: cs.primary,
+                              foregroundColor: cs.onPrimary,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 12),
+                              textStyle: buttonTextStyle,
                             ),
                             onPressed: isLoading ? null : _handlePlay,
                             child: Row(
@@ -375,50 +413,40 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 if (isLoading)
-                                  const SizedBox(
+                                  SizedBox(
                                     width: 16,
                                     height: 16,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
-                                      color: Colors.white,
+                                      valueColor: AlwaysStoppedAnimation(
+                                        cs.onPrimary,
+                                      ),
                                     ),
                                   )
                                 else
-                                  Icon(playIcon, color: Colors.white),
+                                  Icon(playIcon),
                                 const SizedBox(width: 6),
-                                Text(
-                                  playLabel,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
+                                Text(playLabel),
                               ],
                             ),
                           );
 
-                          final downloadButton = ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red[600],
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                          final downloadButton = OutlinedButton(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: cs.onSurface,
+                              side: BorderSide(color: cs.outline),
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 12),
+                              textStyle: buttonTextStyle,
                             ),
                             onPressed: _startDownload,
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               mainAxisSize: MainAxisSize.min,
-                              children: const [
-                                Icon(Icons.download, color: Colors.white),
-                                SizedBox(width: 6),
-                                Text(
-                                  'Download',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
+                              children: [
+                                Icon(Icons.download, color: cs.onSurface),
+                                const SizedBox(width: 6),
+                                const Text('Download'),
                               ],
                             ),
                           );

@@ -12,6 +12,7 @@ class AudioPlayerBottomSheet {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      showDragHandle: false,
       builder: (context) => _AudioPlayerBottomSheetContent(),
     );
   }

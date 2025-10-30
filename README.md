@@ -17,6 +17,7 @@ Easily manage your favorite channels, download audio for offline listening, and 
 - **Instant UI:** Fast, responsive interface with instant loading and smooth navigation.
 - **Cross-Platform:** Works on Android (including Android 13, 14, and 15) and iOS (with some features).
 - **Persistent Storage:** Saved videos, downloads, and playback positions are stored locally.
+- **Adaptive Theme Toggle:** Pick between Material 3 light and dark themes right from the drawer—the app restyles instantly and remembers your choice across launches.
 - **Permission Handling:** Handles notification and background playback permissions for modern Android.
 - **Offline Awareness:** Detects when the device is offline, surfaces a banner, and lets you refresh the moment connectivity returns.
 
@@ -90,6 +91,8 @@ Easily manage your favorite channels, download audio for offline listening, and 
 - [`flutter_local_notifications`](https://pub.dev/packages/flutter_local_notifications)
 - [`workmanager`](https://pub.dev/packages/workmanager)
 - [`permission_handler`](https://pub.dev/packages/permission_handler)
+- [`provider`](https://pub.dev/packages/provider)
+- [`url_launcher`](https://pub.dev/packages/url_launcher)
 - ...and more (see [`pubspec.yaml`](pubspec.yaml))
 
 ---

@@ -30,6 +30,66 @@ class _RelativeSeekIntent extends Intent {
   final Duration offset;
 }
 
+class _SpeedChip extends StatelessWidget {
+  const _SpeedChip({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Text(
+        label,
+        style:
+            theme.textTheme.labelLarge?.copyWith(
+              color: cs.onPrimaryContainer,
+              fontWeight: FontWeight.w600,
+            ) ??
+            TextStyle(
+              color: cs.onPrimaryContainer,
+              fontWeight: FontWeight.w600,
+            ),
+      ),
+    );
+  }
+}
+
+class _QueuePositionPill extends StatelessWidget {
+  const _QueuePositionPill({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.secondaryContainer,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(
+        label,
+        style:
+            theme.textTheme.labelLarge?.copyWith(
+              color: cs.onSecondaryContainer,
+              fontWeight: FontWeight.w600,
+            ) ??
+            TextStyle(
+              color: cs.onSecondaryContainer,
+              fontWeight: FontWeight.w600,
+            ),
+      ),
+    );
+  }
+}
+
 class _AudioControlsState extends State<AudioControls> {
   bool _isDragging = false;
   double _dragValue = 0.0;
@@ -249,22 +309,8 @@ class _AudioControlsState extends State<AudioControls> {
                       ),
                       // Speed control
                       PopupMenuButton<double>(
-                        icon: Container(
-                          padding: EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Colors.grey[200],
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '${_playbackSpeed.toStringAsFixed(1)}x',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
+                        icon: _SpeedChip(
+                          label: '${_playbackSpeed.toStringAsFixed(1)}x',
                         ),
                         itemBuilder: (context) =>
                             [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
@@ -305,15 +351,22 @@ class _AudioControlsState extends State<AudioControls> {
                           children: [
                             SliderTheme(
                               data: SliderTheme.of(context).copyWith(
+                                trackHeight: 4,
                                 activeTrackColor: Theme.of(
                                   context,
-                                ).primaryColor,
-                                inactiveTrackColor: Colors.grey[300],
-                                thumbColor: Theme.of(context).primaryColor,
+                                ).colorScheme.primary,
+                                inactiveTrackColor: Theme.of(
+                                  context,
+                                ).colorScheme.outlineVariant,
+                                thumbColor: Theme.of(
+                                  context,
+                                ).colorScheme.primary,
+                                overlayColor: Theme.of(
+                                  context,
+                                ).colorScheme.primary.withOpacity(0.12),
                                 thumbShape: const RoundSliderThumbShape(
                                   enabledThumbRadius: 6,
                                 ),
-                                trackHeight: 4,
                               ),
                               child: Slider(
                                 value: _isDragging ? _dragValue : progress,
@@ -332,24 +385,50 @@ class _AudioControlsState extends State<AudioControls> {
                               ),
                             ),
                             Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 16),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                              ),
                               child: Row(
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
                                     _formatDuration(position),
-                                    style: TextStyle(
-                                      color: Colors.grey[600],
-                                      fontSize: 12,
-                                    ),
+                                    style:
+                                        Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall?.copyWith(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.7),
+                                        ) ??
+                                        TextStyle(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.7),
+                                          fontSize: 12,
+                                        ),
                                   ),
                                   Text(
                                     _formatDuration(duration),
-                                    style: TextStyle(
-                                      color: Colors.grey[600],
-                                      fontSize: 12,
-                                    ),
+                                    style:
+                                        Theme.of(
+                                          context,
+                                        ).textTheme.bodySmall?.copyWith(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.7),
+                                        ) ??
+                                        TextStyle(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.7),
+                                          fontSize: 12,
+                                        ),
                                   ),
                                 ],
                               ),
@@ -368,8 +447,9 @@ class _AudioControlsState extends State<AudioControls> {
                                     size: 32,
                                   ),
                                   color: widget.currentIndex > 0
-                                      ? null
-                                      : Colors.grey[400],
+                                      ? Theme.of(context).colorScheme.onSurface
+                                      : Theme.of(context).colorScheme.onSurface
+                                            .withOpacity(0.4),
                                 ),
                                 Tooltip(
                                   message: 'Rewind 10 seconds',
@@ -381,7 +461,14 @@ class _AudioControlsState extends State<AudioControls> {
                                         ? () => _seekRelative(-skipInterval)
                                         : null,
                                     icon: const Icon(Icons.replay_10, size: 32),
-                                    color: canRewind ? null : Colors.grey[400],
+                                    color: canRewind
+                                        ? Theme.of(
+                                            context,
+                                          ).colorScheme.onSurface
+                                        : Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.4),
                                   ),
                                 ),
                                 // Play/Pause
@@ -411,9 +498,10 @@ class _AudioControlsState extends State<AudioControls> {
                                         ? Icons.pause
                                         : Icons.play_arrow;
 
+                                    final cs = Theme.of(context).colorScheme;
                                     return Container(
                                       decoration: BoxDecoration(
-                                        color: Theme.of(context).primaryColor,
+                                        color: cs.primary,
                                         shape: BoxShape.circle,
                                       ),
                                       child: IconButton(
@@ -421,7 +509,7 @@ class _AudioControlsState extends State<AudioControls> {
                                             ? null
                                             : _playPause,
                                         icon: isBuffering
-                                            ? const SizedBox(
+                                            ? SizedBox(
                                                 width: 24,
                                                 height: 24,
                                                 child: CircularProgressIndicator(
@@ -429,13 +517,13 @@ class _AudioControlsState extends State<AudioControls> {
                                                   valueColor:
                                                       AlwaysStoppedAnimation<
                                                         Color
-                                                      >(Colors.white),
+                                                      >(cs.onPrimary),
                                                 ),
                                               )
                                             : Icon(
                                                 icon,
                                                 size: 32,
-                                                color: Colors.white,
+                                                color: cs.onPrimary,
                                               ),
                                       ),
                                     );
@@ -454,7 +542,14 @@ class _AudioControlsState extends State<AudioControls> {
                                       Icons.forward_10,
                                       size: 32,
                                     ),
-                                    color: canForward ? null : Colors.grey[400],
+                                    color: canForward
+                                        ? Theme.of(
+                                            context,
+                                          ).colorScheme.onSurface
+                                        : Theme.of(context)
+                                              .colorScheme
+                                              .onSurface
+                                              .withOpacity(0.4),
                                   ),
                                 ),
                                 // Next track
@@ -468,8 +563,9 @@ class _AudioControlsState extends State<AudioControls> {
                                   color:
                                       widget.currentIndex <
                                           widget.playlist.length - 1
-                                      ? null
-                                      : Colors.grey[400],
+                                      ? Theme.of(context).colorScheme.onSurface
+                                      : Theme.of(context).colorScheme.onSurface
+                                            .withOpacity(0.4),
                                 ),
                               ],
                             ),
@@ -483,20 +579,9 @@ class _AudioControlsState extends State<AudioControls> {
 
                 // Playlist info
                 if (widget.playlist.isNotEmpty && widget.currentIndex >= 0) ...[
-                  Container(
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[100],
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '${widget.currentIndex + 1} of ${widget.playlist.length}',
-                      style: TextStyle(
-                        color: Colors.grey[600],
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
+                  _QueuePositionPill(
+                    label:
+                        '${widget.currentIndex + 1} of ${widget.playlist.length}',
                   ),
                 ],
 

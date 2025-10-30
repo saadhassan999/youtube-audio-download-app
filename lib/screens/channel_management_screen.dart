@@ -2,6 +2,7 @@ import 'dart:io' show FileSystemException;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../core/fetch_exception.dart';
 import '../models/channel.dart';
 import '../models/video.dart';
@@ -17,9 +18,13 @@ import '../widgets/mini_player.dart';
 import '../widgets/channel_video_tile.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../theme/theme_notifier.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:async';
+
+const String kSupportEmail = 'saadhassan99950@gmail.com';
 
 class ChannelManagementScreen extends StatefulWidget {
   const ChannelManagementScreen({super.key});
@@ -30,6 +35,7 @@ class ChannelManagementScreen extends StatefulWidget {
 
 class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     with SingleTickerProviderStateMixin {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final ChannelRepository _channelRepository = ChannelRepository.instance;
   final Map<String, _ChannelSectionState> _channelStates = {};
   final Map<String, Future<void>> _channelRefreshes = {};
@@ -41,6 +47,89 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   final _scroll = ScrollController();
   StreamSubscription<dynamic>? _connectivitySub;
   StreamSubscription<List<SavedVideo>>? _savedVideosSub;
+
+  Drawer _buildDrawer(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final notifier = context.watch<ThemeNotifier>();
+    return Drawer(
+      child: Container(
+        color: theme.drawerTheme.backgroundColor ?? colorScheme.surface,
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration: BoxDecoration(color: colorScheme.primary),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Text(
+                    'YT AudioBox',
+                    style:
+                        theme.textTheme.headlineSmall?.copyWith(
+                          color: colorScheme.onPrimary,
+                          fontWeight: FontWeight.bold,
+                        ) ??
+                        TextStyle(
+                          color: colorScheme.onPrimary,
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Audio downloader & player',
+                    style:
+                        theme.textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onPrimary.withOpacity(0.85),
+                        ) ??
+                        TextStyle(
+                          color: colorScheme.onPrimary.withOpacity(0.85),
+                        ),
+                  ),
+                ],
+              ),
+            ),
+            SwitchListTile.adaptive(
+              secondary: Icon(
+                notifier.isDarkMode ? Icons.nightlight_round : Icons.wb_sunny,
+              ),
+              title: const Text('Dark Mode'),
+              value: notifier.isDarkMode,
+              onChanged: (value) => notifier.toggleTheme(value),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.email_outlined),
+              title: const Text('Contact Developer'),
+              subtitle: const Text(kSupportEmail),
+              onTap: _launchSupportEmail,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _launchSupportEmail() async {
+    final uri = Uri(
+      scheme: 'mailto',
+      path: kSupportEmail,
+      queryParameters: {'subject': 'YT AudioBox Support'},
+    );
+    if (await canLaunchUrl(uri)) {
+      final opened = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        showGlobalSnackBarMessage('No email app found');
+      }
+    } else {
+      showGlobalSnackBarMessage('No email app found');
+    }
+  }
 
   void _openDownloads() {
     Navigator.push(
@@ -408,11 +497,15 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
 
     final keyboardVisible = ime > 0;
     final contentBottomPadding = keyboardVisible ? 0.0 : safe;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
     return Scaffold(
+      key: _scaffoldKey,
       resizeToAvoidBottomInset: true,
-      backgroundColor: Colors.white,
+      backgroundColor: theme.scaffoldBackgroundColor,
       bottomNavigationBar: const MiniPlayerHost(),
+      drawer: _buildDrawer(context),
       body: SafeArea(
         bottom: false,
         child: AnimatedPadding(
@@ -430,11 +523,15 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                 SliverAppBar(
                   pinned: true,
                   elevation: 0,
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.black87,
-                  automaticallyImplyLeading: false,
+                  backgroundColor: colorScheme.surface,
+                  foregroundColor: colorScheme.onSurface,
                   titleSpacing: 16,
                   centerTitle: false,
+                  leading: IconButton(
+                    icon: const Icon(Icons.menu),
+                    onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                    tooltip: 'Menu',
+                  ),
                   title: const Text(
                     'YT AudioBox',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
@@ -788,12 +885,13 @@ class _SearchBarContainer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 64),
       child: SizedBox(
         width: double.infinity,
         child: Material(
-          color: Colors.white,
+          color: theme.colorScheme.surface,
           borderRadius: BorderRadius.circular(12),
           elevation: 0,
           child: Padding(
@@ -866,6 +964,9 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
   Widget build(BuildContext context) {
     final saved = widget.savedVideo;
     final durationText = _formatDuration(saved.duration);
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final muted = onSurface.withOpacity(0.7);
 
     return Card(
       elevation: 2,
@@ -886,30 +987,38 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                     children: [
                       Text(
                         saved.title,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        style:
+                            theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                              color: onSurface,
+                            ) ??
+                            TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: onSurface,
+                            ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 6),
                       Text(
                         saved.channelTitle,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: Colors.grey,
-                        ),
+                        style:
+                            theme.textTheme.bodyMedium?.copyWith(
+                              color: muted,
+                            ) ??
+                            TextStyle(fontSize: 13, color: muted),
                       ),
                       if (durationText != null)
                         Padding(
                           padding: const EdgeInsets.only(top: 4),
                           child: Text(
                             durationText,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey,
-                            ),
+                            style:
+                                theme.textTheme.bodySmall?.copyWith(
+                                  color: muted,
+                                ) ??
+                                TextStyle(fontSize: 12, color: muted),
                           ),
                         ),
                       const SizedBox(height: 8),
@@ -923,9 +1032,16 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                             saved.status,
                           ),
                           if (_hasError)
-                            const Text(
+                            Text(
                               'Tap download to try again',
-                              style: TextStyle(fontSize: 12, color: Colors.red),
+                              style:
+                                  theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.error,
+                                  ) ??
+                                  TextStyle(
+                                    fontSize: 12,
+                                    color: theme.colorScheme.error,
+                                  ),
                             ),
                         ],
                       ),
@@ -1159,7 +1275,7 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                       vertical: 2,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.6),
+                      color: Colors.black.withOpacity(0.6),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Text(

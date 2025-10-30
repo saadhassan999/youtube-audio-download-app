@@ -95,21 +95,25 @@ class _MiniPlayerState extends State<MiniPlayer> {
       return const SizedBox.shrink();
     }
 
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final textTheme = theme.textTheme;
     final thumbnailUrl = playing.thumbnailUrl ?? '';
     final title = playing.title ?? 'Now playing';
     final channelName = playing.channelName ?? '';
+    final onSurfaceMuted = cs.onSurface.withOpacity(0.7);
 
     return SafeArea(
       top: false,
       child: Container(
         height: 64, // slightly reduced height
         decoration: BoxDecoration(
-          color: Theme.of(context).cardColor,
+          color: cs.surface,
           boxShadow: [
             BoxShadow(
-              color: Colors.black12,
+              color: theme.shadowColor.withOpacity(0.12),
               blurRadius: 8,
-              offset: Offset(0, -2),
+              offset: const Offset(0, -2),
             ),
           ],
         ),
@@ -132,10 +136,10 @@ class _MiniPlayerState extends State<MiniPlayer> {
                             return Container(
                               width: 48,
                               height: 48,
-                              color: Colors.grey[300],
+                              color: cs.surfaceVariant,
                               child: Icon(
                                 Icons.music_note,
-                                color: Colors.grey[600],
+                                color: cs.onSurfaceVariant,
                               ),
                             );
                           },
@@ -143,10 +147,10 @@ class _MiniPlayerState extends State<MiniPlayer> {
                       : Container(
                           width: 48,
                           height: 48,
-                          color: Colors.grey[300],
+                          color: cs.surfaceVariant,
                           child: Icon(
                             Icons.music_note,
-                            color: Colors.grey[600],
+                            color: cs.onSurfaceVariant,
                           ),
                         ),
                 ),
@@ -154,31 +158,40 @@ class _MiniPlayerState extends State<MiniPlayer> {
               SizedBox(width: 8),
               // Track info
               Expanded(
-                child: GestureDetector(
-                  onTap: _showFullPlayer,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        title,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 13,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      SizedBox(height: 2),
-                      Text(
-                        channelName,
-                        style: TextStyle(color: Colors.grey[600], fontSize: 11),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
+              child: GestureDetector(
+                onTap: _showFullPlayer,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      title,
+                      style: textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurface,
+                          ) ??
+                          TextStyle(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13,
+                            color: cs.onSurface,
+                          ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      channelName,
+                      style: textTheme.bodySmall?.copyWith(
+                            color: onSurfaceMuted,
+                            fontSize: 11,
+                          ) ??
+                          TextStyle(color: onSurfaceMuted, fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
                 ),
               ),
               // Control buttons
@@ -203,14 +216,14 @@ class _MiniPlayerState extends State<MiniPlayer> {
                           Tooltip(
                             message: 'Rewind 10 seconds',
                             waitDuration: const Duration(milliseconds: 400),
-                            child: IconButton(
+                          child: IconButton(
                               onPressed: canRewind
                                   ? () => _seekRelative(-skipInterval)
                                   : null,
                               icon: const Icon(Icons.replay_10, size: 22),
                               color: canRewind
-                                  ? Colors.grey[600]
-                                  : Colors.grey[400],
+                                  ? cs.onSurface
+                                  : cs.onSurface.withOpacity(0.4),
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints(),
                             ),
@@ -223,7 +236,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
                                   : Icons.play_arrow,
                               size: 22,
                             ),
-                            color: Theme.of(context).primaryColor,
+                            color: cs.primary,
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
                           ),
@@ -236,8 +249,8 @@ class _MiniPlayerState extends State<MiniPlayer> {
                                   : null,
                               icon: const Icon(Icons.forward_10, size: 22),
                               color: canForward
-                                  ? Colors.grey[600]
-                                  : Colors.grey[400],
+                                  ? cs.onSurface
+                                  : cs.onSurface.withOpacity(0.4),
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints(),
                             ),
@@ -245,14 +258,14 @@ class _MiniPlayerState extends State<MiniPlayer> {
                           IconButton(
                             onPressed: _showFullPlayer,
                             icon: const Icon(Icons.expand_less, size: 22),
-                            color: Colors.grey[600],
+                            color: cs.onSurface,
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),
                           ),
                           IconButton(
                             onPressed: _clearSession,
                             icon: const Icon(Icons.close, size: 20),
-                            color: Colors.grey[500],
+                            color: cs.onSurface.withOpacity(0.5),
                             tooltip: 'Close player',
                             padding: EdgeInsets.zero,
                             constraints: const BoxConstraints(),

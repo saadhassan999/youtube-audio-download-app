@@ -13,6 +13,8 @@ import '../core/snackbar_bus.dart';
 import '../repositories/download_repository.dart';
 
 class DownloadManagerScreen extends StatefulWidget {
+  const DownloadManagerScreen({super.key});
+
   @override
   _DownloadManagerScreenState createState() => _DownloadManagerScreenState();
 }
@@ -216,14 +218,25 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
   @override
   Widget build(BuildContext context) {
     final showSpinner = _isLoading && downloadedVideosNotifier.value.isEmpty;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     return Scaffold(
       appBar: AppBar(
         title: Text(
           'Downloads',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
+          style:
+              theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: colorScheme.onSurface,
+              ) ??
+              TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 22,
+                color: colorScheme.onSurface,
+              ),
         ),
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
+        backgroundColor: colorScheme.surface,
+        foregroundColor: colorScheme.onSurface,
         elevation: 0.5,
         actions: [
           if (_orphanedFiles.isNotEmpty)
@@ -234,7 +247,7 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
             ),
         ],
       ),
-      backgroundColor: Colors.white,
+      backgroundColor: theme.scaffoldBackgroundColor,
       bottomNavigationBar: const MiniPlayerHost(),
       body: SafeArea(
         child: Column(
@@ -284,36 +297,35 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                               .toList();
 
                           if (videos.isEmpty) {
-                          final message = _lastRefreshError ??
-                              'No downloads yet. Pull down after reconnecting.';
-                          return ListView(
-                            physics:
-                                const AlwaysScrollableScrollPhysics(),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 32,
-                            ),
-                            children: [
-                              Text(
-                                message,
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Colors.grey[700]),
+                            final message =
+                                _lastRefreshError ??
+                                'No downloads yet. Pull down after reconnecting.';
+                            return ListView(
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 32,
                               ),
-                              if (_lastRefreshError != null)
-                                const SizedBox(height: 12),
-                              if (_lastRefreshError != null)
-                                _buildRefreshButton(
-                                  label: 'Retry',
-                                  isBusy: _isRefreshing,
-                                  onPressed: () => _refreshDownloads(),
+                              children: [
+                                Text(
+                                  message,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: Colors.grey[700]),
                                 ),
+                                if (_lastRefreshError != null)
+                                  const SizedBox(height: 12),
+                                if (_lastRefreshError != null)
+                                  _buildRefreshButton(
+                                    label: 'Retry',
+                                    isBusy: _isRefreshing,
+                                    onPressed: () => _refreshDownloads(),
+                                  ),
                               ],
                             );
                           }
 
                           return ListView(
-                            physics:
-                                const AlwaysScrollableScrollPhysics(),
+                            physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.symmetric(
                               horizontal: 12,
                               vertical: 8,
@@ -347,8 +359,8 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                                 height: 16,
                                                 child:
                                                     CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                ),
+                                                      strokeWidth: 2,
+                                                    ),
                                               )
                                             : const Text('Retry'),
                                       ),
@@ -365,8 +377,9 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                               ),
                               if (inProgressVideos.isEmpty)
                                 Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 12),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
                                   child: Text(
                                     'No active downloads.',
                                     style: TextStyle(color: Colors.grey[600]),
@@ -382,31 +395,35 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                   child: ListTile(
                                     leading: video.thumbnailUrl.isNotEmpty
                                         ? ClipRRect(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
+                                            borderRadius: BorderRadius.circular(
+                                              8,
+                                            ),
                                             child: Image.network(
                                               video.thumbnailUrl,
                                               width: 56,
                                               height: 56,
                                               fit: BoxFit.cover,
-                                              errorBuilder: (
-                                                context,
-                                                error,
-                                                stackTrace,
-                                              ) =>
-                                                  Container(
-                                                width: 56,
-                                                height: 56,
-                                                color: Colors.grey.shade300,
-                                                alignment: Alignment.center,
-                                                child: Icon(
-                                                  Icons.music_note,
-                                                  color: Colors.grey[600],
-                                                ),
-                                              ),
+                                              errorBuilder:
+                                                  (
+                                                    context,
+                                                    error,
+                                                    stackTrace,
+                                                  ) => Container(
+                                                    width: 56,
+                                                    height: 56,
+                                                    color: Colors.grey.shade300,
+                                                    alignment: Alignment.center,
+                                                    child: Icon(
+                                                      Icons.music_note,
+                                                      color: Colors.grey[600],
+                                                    ),
+                                                  ),
                                             ),
                                           )
-                                        : const Icon(Icons.music_note, size: 56),
+                                        : const Icon(
+                                            Icons.music_note,
+                                            size: 56,
+                                          ),
                                     title: Column(
                                       crossAxisAlignment:
                                           CrossAxisAlignment.start,
@@ -422,13 +439,14 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                         ),
                                         const SizedBox(height: 4),
                                         ValueListenableBuilder<
-                                            Map<String, double>>(
+                                          Map<String, double>
+                                        >(
                                           valueListenable: DownloadService
                                               .downloadProgressNotifier,
                                           builder: (context, progressMap, _) {
                                             final progress =
                                                 progressMap[video.videoId] ??
-                                                    0.0;
+                                                0.0;
                                             return Column(
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
@@ -442,9 +460,8 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                                       Colors.grey.shade300,
                                                   valueColor:
                                                       AlwaysStoppedAnimation<
-                                                          Color>(
-                                                    Colors.orange,
-                                                  ),
+                                                        Color
+                                                      >(Colors.orange),
                                                 ),
                                                 const SizedBox(height: 4),
                                                 Text(
@@ -479,8 +496,7 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                         );
                                       },
                                     ),
-                                    contentPadding:
-                                        const EdgeInsets.symmetric(
+                                    contentPadding: const EdgeInsets.symmetric(
                                       vertical: 4,
                                       horizontal: 8,
                                     ),
@@ -498,8 +514,9 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                               ),
                               if (completedList.isEmpty)
                                 Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 12),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 12,
+                                  ),
                                   child: Text(
                                     'No completed downloads.',
                                     style: TextStyle(color: Colors.grey[600]),
@@ -517,32 +534,28 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                                       final confirm = await showDialog<bool>(
                                         context: context,
                                         builder: (context) => AlertDialog(
-                                          title:
-                                              const Text('Delete Audio'),
+                                          title: const Text('Delete Audio'),
                                           content: const Text(
                                             'Are you sure you want to delete this audio?',
                                           ),
                                           actions: [
                                             TextButton(
-                                              onPressed: () =>
-                                                  Navigator.of(context).pop(
-                                                    false,
-                                                  ),
+                                              onPressed: () => Navigator.of(
+                                                context,
+                                              ).pop(false),
                                               child: const Text('No'),
                                             ),
                                             TextButton(
-                                              onPressed: () =>
-                                                  Navigator.of(context).pop(
-                                                    true,
-                                                  ),
+                                              onPressed: () => Navigator.of(
+                                                context,
+                                              ).pop(true),
                                               child: const Text('Yes'),
                                             ),
                                           ],
                                         ),
                                       );
                                       if (confirm == true) {
-                                        await DownloadService
-                                            .deleteDownloadedAudio(
+                                        await DownloadService.deleteDownloadedAudio(
                                           video.videoId,
                                         );
                                         await _loadDownloadedVideos(
@@ -798,8 +811,7 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
             int lastPos = 0;
             if (!wasAlreadyLoaded) {
               final prefs = await SharedPreferences.getInstance();
-              lastPos =
-                  prefs.getInt('audio_position_${video.videoId}') ?? 0;
+              lastPos = prefs.getInt('audio_position_${video.videoId}') ?? 0;
             }
             await DownloadService.playOrPause(
               video.videoId,
