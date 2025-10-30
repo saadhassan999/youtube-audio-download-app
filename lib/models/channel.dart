@@ -1,3 +1,5 @@
+import 'package:intl/intl.dart';
+
 class Channel {
   final String id;
   final String name;
@@ -18,6 +20,20 @@ class Channel {
     this.subscriberCount,
     this.hiddenSubscriberCount = false,
   });
+
+  String get formattedSubscribers {
+    if (hiddenSubscriberCount) {
+      return 'Subscribers hidden';
+    }
+
+    final count = subscriberCount ?? 0;
+    final locale = Intl.getCurrentLocale();
+    final formatter = NumberFormat.compact(
+      locale: Intl.defaultLocale ?? (locale.isEmpty ? null : locale),
+    );
+    final formatted = formatter.format(count);
+    return '$formatted subscribers';
+  }
 
   Map<String, dynamic> toMap() => {
     'id': id,

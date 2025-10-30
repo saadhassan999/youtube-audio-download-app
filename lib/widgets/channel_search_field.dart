@@ -9,7 +9,6 @@ import '../models/video.dart';
 import '../repositories/video_repository.dart';
 import '../services/database_service.dart';
 import '../services/youtube_service.dart';
-import '../utils/youtube_utils.dart';
 
 class ChannelSearchField extends StatefulWidget {
   final Function(Channel) onChannelSelected;
@@ -329,7 +328,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
         padding: const EdgeInsets.all(16),
         child: Text(
           _statusMessage ?? 'No results to display.',
-          style: textTheme.bodyMedium?.copyWith(
+          style:
+              textTheme.bodyMedium?.copyWith(
                 color: _statusIsError
                     ? cs.error
                     : cs.onSurface.withOpacity(0.75),
@@ -391,11 +391,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
     final handleText = channel.handle?.isNotEmpty == true
         ? channel.handle
         : null;
-    final hasSubscriberCount =
-        !channel.hiddenSubscriberCount && channel.subscriberCount != null;
-    final subscriberText = hasSubscriberCount
-        ? '${formatSubscriberCount(channel.subscriberCount)} subscribers'
-        : 'Subscribers hidden';
+    final subscriberText = channel.formattedSubscribers;
 
     final children = <Widget>[];
     if (isFirstChannel) {
@@ -407,14 +403,12 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
         leading: _buildChannelAvatar(channel.thumbnailUrl),
         title: Text(
           channel.name,
-          style: textTheme.titleMedium?.copyWith(
+          style:
+              textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface,
               ) ??
-              TextStyle(
-                fontWeight: FontWeight.w600,
-                color: cs.onSurface,
-              ),
+              TextStyle(fontWeight: FontWeight.w600, color: cs.onSurface),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -423,7 +417,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
             if (handleText != null)
               Text(
                 handleText,
-                style: textTheme.bodySmall?.copyWith(
+                style:
+                    textTheme.bodySmall?.copyWith(
                       color: cs.onSurface.withOpacity(0.7),
                     ) ??
                     TextStyle(
@@ -433,21 +428,16 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
               ),
             Text(
               subscriberText,
-              style: textTheme.bodySmall?.copyWith(
+              style:
+                  textTheme.bodyMedium?.copyWith(
                     color: cs.onSurface.withOpacity(0.7),
                   ) ??
-                  TextStyle(
-                    fontSize: 12,
-                    color: cs.onSurface.withOpacity(0.7),
-                  ),
+                  TextStyle(fontSize: 14, color: cs.onSurface.withOpacity(0.7)),
             ),
           ],
         ),
         onTap: () => _onSuggestionSelected(channel),
-        trailing: Icon(
-          Icons.add_circle_outline,
-          color: cs.primary,
-        ),
+        trailing: Icon(Icons.add_circle_outline, color: cs.primary),
       ),
     );
     return Column(
@@ -476,26 +466,22 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
           video.title,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
-          style: textTheme.titleMedium?.copyWith(
+          style:
+              textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface,
               ) ??
-              TextStyle(
-                fontWeight: FontWeight.w600,
-                color: cs.onSurface,
-              ),
+              TextStyle(fontWeight: FontWeight.w600, color: cs.onSurface),
         ),
         subtitle: Text(
           video.channelName,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: textTheme.bodySmall?.copyWith(
+          style:
+              textTheme.bodySmall?.copyWith(
                 color: cs.onSurface.withOpacity(0.7),
               ) ??
-              TextStyle(
-                fontSize: 12,
-                color: cs.onSurface.withOpacity(0.7),
-              ),
+              TextStyle(fontSize: 12, color: cs.onSurface.withOpacity(0.7)),
         ),
         trailing: Icon(Icons.library_add, color: cs.primary),
         onTap: () => _onVideoSelected(video),
@@ -512,7 +498,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
       child: Text(
         label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+        style:
+            Theme.of(context).textTheme.labelSmall?.copyWith(
               fontWeight: FontWeight.w600,
               color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
             ) ??
@@ -565,10 +552,17 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
     final cs = theme?.colorScheme;
     final placeholderColor = cs?.surfaceVariant ?? Colors.grey.shade300;
     final iconColor = cs?.onSurfaceVariant ?? Colors.grey.shade600;
-    final overlayColor =
-        cs?.scrim.withOpacity(0.7) ?? Colors.black.withOpacity(0.7);
-    final overlayTextColor =
-        cs?.onInverseSurface ?? Colors.white.withOpacity(0.94);
+    final brightness = theme?.brightness ?? Brightness.light;
+    final Color overlayColor;
+    final Color overlayTextColor;
+    if (brightness == Brightness.dark) {
+      final inverseSurface = cs?.inverseSurface ?? Colors.white;
+      overlayColor = inverseSurface.withOpacity(0.92);
+      overlayTextColor = cs?.onInverseSurface ?? Colors.black87;
+    } else {
+      overlayColor = Colors.black.withOpacity(0.7);
+      overlayTextColor = cs?.onPrimary ?? Colors.white;
+    }
     final durationLabel = duration != null
         ? _formatVideoDuration(duration)
         : null;
@@ -610,7 +604,8 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
                     ),
                     child: Text(
                       durationLabel,
-                      style: theme?.textTheme.labelSmall?.copyWith(
+                      style:
+                          theme?.textTheme.labelSmall?.copyWith(
                             color: overlayTextColor,
                             fontWeight: FontWeight.w600,
                           ) ??
@@ -739,26 +734,26 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
             },
           ),
         ),
-          Positioned(
-            left: left,
-            top: top,
-            width: dropdownWidth,
-            child: Material(
-              elevation: 8,
-              color: theme.colorScheme.surface,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: dropdownMaxHeight),
-                child: _buildSuggestionsContent(context),
-              ),
+        Positioned(
+          left: left,
+          top: top,
+          width: dropdownWidth,
+          child: Material(
+            elevation: 8,
+            color: theme.colorScheme.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: dropdownMaxHeight),
+              child: _buildSuggestionsContent(context),
             ),
           ),
-        ],
-      );
-    }
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {

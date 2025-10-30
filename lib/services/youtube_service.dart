@@ -32,15 +32,10 @@ class YouTubeService {
   }) async {
     final queryParams = <String, String>{'channel_id': channelId};
     if (forceRefresh) {
-      queryParams['ts'] =
-          DateTime.now().millisecondsSinceEpoch.toString();
+      queryParams['ts'] = DateTime.now().millisecondsSinceEpoch.toString();
     }
 
-    final uri = Uri.https(
-      'www.youtube.com',
-      '/feeds/videos.xml',
-      queryParams,
-    );
+    final uri = Uri.https('www.youtube.com', '/feeds/videos.xml', queryParams);
 
     final headers = <String, String>{};
     if (forceRefresh) {
@@ -49,7 +44,10 @@ class YouTubeService {
     }
 
     try {
-      final response = await http.get(uri, headers: headers.isEmpty ? null : headers);
+      final response = await http.get(
+        uri,
+        headers: headers.isEmpty ? null : headers,
+      );
       if (response.statusCode == 200) {
         return parseRssFeed(response.body);
       }
@@ -70,10 +68,7 @@ class YouTubeService {
       );
     } catch (e) {
       if (e is FetchException) rethrow;
-      throw FetchException(
-        message: 'Failed to load RSS feed',
-        cause: e,
-      );
+      throw FetchException(message: 'Failed to load RSS feed', cause: e);
     }
   }
 
@@ -225,7 +220,8 @@ class YouTubeService {
       final ytExplode = yt.YoutubeExplode();
       try {
         final meta = await ytExplode.videos.get(trimmed);
-        final published = meta.publishDate?.toUtc() ??
+        final published =
+            meta.publishDate?.toUtc() ??
             meta.uploadDate?.toUtc() ??
             DateTime.now().toUtc();
         return Video(
@@ -270,23 +266,41 @@ class YouTubeService {
       return [];
     }
 
-    final channelIds = <String>[];
-    for (final item in items) {
-      final channelId = item['id']?['channelId'] as String?;
-      if (channelId != null) {
-        channelIds.add(channelId);
-      }
-    }
-
+    final channelIds = items
+        .map((item) => item['id']?['channelId'] as String?)
+        .whereType<String>()
+        .toList(growable: false);
     if (channelIds.isEmpty) {
       return [];
     }
 
     final details = await _fetchChannelDetails(client, channelIds);
-    return channelIds
-        .map((id) => details[id])
-        .whereType<Channel>()
-        .toList(growable: false);
+
+    final results = <Channel>[];
+    for (final item in items) {
+      final channelId = item['id']?['channelId'] as String?;
+      if (channelId == null) continue;
+
+      final detail = details[channelId];
+      if (detail != null) {
+        results.add(detail);
+        continue;
+      }
+
+      final snippet = item['snippet'] as Map<String, dynamic>? ?? {};
+      final thumbnails =
+          snippet['thumbnails'] as Map<String, dynamic>? ?? const {};
+      results.add(
+        Channel(
+          id: channelId,
+          name: snippet['title'] as String? ?? '',
+          description: snippet['description'] as String? ?? '',
+          thumbnailUrl: _selectThumbnailUrl(thumbnails),
+        ),
+      );
+    }
+
+    return results;
   }
 
   static Future<Map<String, Channel>> _fetchChannelDetails(
@@ -327,9 +341,7 @@ class YouTubeService {
           ? _formatHandle(customUrl)
           : null;
 
-      final hidden =
-          statistics['hiddenSubscriberCount']?.toString().toLowerCase() ==
-          'true';
+      final hidden = statistics['hiddenSubscriberCount'] == true;
       final subscriberCount = hidden
           ? null
           : int.tryParse(statistics['subscriberCount']?.toString() ?? '');
@@ -370,7 +382,8 @@ class YouTubeService {
                   ? channel.thumbnails.last.url.toString()
                   : '',
               handle: null,
-              // youtube_explode does not expose subscriber counts
+              subscriberCount: null,
+              hiddenSubscriberCount: false,
             ),
           )
           .toList();
@@ -416,7 +429,14 @@ class YouTubeService {
         final channelName = match.group(2);
 
         if (channelId != null && channelName != null) {
-          channels.add(Channel(id: channelId, name: channelName));
+          channels.add(
+            Channel(
+              id: channelId,
+              name: channelName,
+              subscriberCount: null,
+              hiddenSubscriberCount: false,
+            ),
+          );
         }
       }
 
@@ -438,8 +458,7 @@ class YouTubeService {
       'type': 'video',
       'maxResults': maxResults.toString(),
       'key': _apiKey,
-      'fields':
-          'items(id/videoId)',
+      'fields': 'items(id/videoId)',
     });
 
     final searchResponse = await client.get(searchUrl);
@@ -571,8 +590,9 @@ class YouTubeService {
       final results = <Video>[];
       for (final item in searchList.whereType<yt.SearchVideo>()) {
         final duration = _parseColonDuration(item.duration);
-        final thumbnail =
-            item.thumbnails.isNotEmpty ? item.thumbnails.first.url.toString() : '';
+        final thumbnail = item.thumbnails.isNotEmpty
+            ? item.thumbnails.first.url.toString()
+            : '';
         results.add(
           Video(
             id: item.id.value,
@@ -718,7 +738,8 @@ class YouTubeService {
     final hours = int.tryParse(match.group(2) ?? '');
     final minutes = int.tryParse(match.group(3) ?? '');
     final seconds = int.tryParse(match.group(4) ?? '');
-    final totalSeconds = (days ?? 0) * 86400 +
+    final totalSeconds =
+        (days ?? 0) * 86400 +
         (hours ?? 0) * 3600 +
         (minutes ?? 0) * 60 +
         (seconds ?? 0);

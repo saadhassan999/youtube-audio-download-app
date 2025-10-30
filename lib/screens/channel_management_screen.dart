@@ -18,13 +18,11 @@ import '../widgets/mini_player.dart';
 import '../widgets/channel_video_tile.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../theme/theme_notifier.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:async';
-
-const String kSupportEmail = 'saadhassan99950@gmail.com';
+import '../utils/launch_utils.dart';
 
 class ChannelManagementScreen extends StatefulWidget {
   const ChannelManagementScreen({super.key});
@@ -102,33 +100,20 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
             const Divider(),
             ListTile(
               leading: const Icon(Icons.email_outlined),
-              title: const Text('Contact Developer'),
+              title: const Text('Contact / Support'),
               subtitle: const Text(kSupportEmail),
-              onTap: _launchSupportEmail,
+              onTap: () => openSupportEmail(context),
+              onLongPress: () => copySupportEmail(context),
+              trailing: IconButton(
+                icon: const Icon(Icons.copy),
+                tooltip: 'Copy email',
+                onPressed: () => copySupportEmail(context),
+              ),
             ),
           ],
         ),
       ),
     );
-  }
-
-  Future<void> _launchSupportEmail() async {
-    final uri = Uri(
-      scheme: 'mailto',
-      path: kSupportEmail,
-      queryParameters: {'subject': 'YT AudioBox Support'},
-    );
-    if (await canLaunchUrl(uri)) {
-      final opened = await launchUrl(
-        uri,
-        mode: LaunchMode.externalApplication,
-      );
-      if (!opened) {
-        showGlobalSnackBarMessage('No email app found');
-      }
-    } else {
-      showGlobalSnackBarMessage('No email app found');
-    }
   }
 
   void _openDownloads() {
