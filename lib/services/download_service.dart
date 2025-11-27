@@ -92,9 +92,18 @@ class DownloadService {
     'Connection': 'keep-alive',
     'Accept': '*/*',
   };
-  static final ExtractorService _extractor = CompositeExtractor(
-    NativeYtDlpExtractor(),
+  static const int _minValidDownloadBytes = 200 * 1024; // 200 KiB guardrail
+  static final ExtractorService _streamExtractor = CompositeExtractor(
+    const NativeYtDlpExtractor(forDownload: false),
     YoutubeExplodeExtractor(),
+    primaryTimeout: const Duration(seconds: 60),
+    runFallbackInIsolate: true,
+  );
+  static final ExtractorService _downloadExtractor = CompositeExtractor(
+    const NativeYtDlpExtractor(forDownload: true),
+    YoutubeExplodeExtractor(),
+    primaryTimeout: const Duration(seconds: 60),
+    runFallbackInIsolate: true,
   );
   static const MethodChannel _foregroundChannel = MethodChannel(
     'download_foreground_service',
@@ -103,6 +112,44 @@ class DownloadService {
 
   static void _log(String message) {
     debugPrint('[DownloadService] $message');
+  }
+
+  static bool _looksLikeManifestUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('manifest.googlevideo.com') ||
+        lower.contains('.m3u8') ||
+        lower.contains('playlist.m3u8') ||
+        lower.contains('mime=application%2fx-mpegurl');
+  }
+
+  static String _guessExtension(String? mimeType, String? container) {
+    final mime = mimeType?.toLowerCase() ?? '';
+    final c = container?.toLowerCase() ?? '';
+    if (mime.startsWith('audio/mp4') || c == 'm4a' || c == 'mp4') {
+      return 'm4a';
+    }
+    if (mime.startsWith('audio/webm') || c == 'webm' || c == 'weba') {
+      return 'webm';
+    }
+    if (mime.startsWith('audio/mpeg') || c == 'mp3') {
+      return 'mp3';
+    }
+    return 'm4a';
+  }
+
+  static Future<bool> _isLikelyCorruptFile(File file) async {
+    try {
+      final raf = await file.open();
+      final header = await raf.read(16);
+      await raf.close();
+      if (header.isEmpty) return true;
+      final headerString = String.fromCharCodes(header);
+      return headerString.startsWith('#EXTM3U') ||
+          headerString.startsWith('<!DOCTYPE') ||
+          headerString.startsWith('<html');
+    } catch (_) {
+      return true;
+    }
   }
 
   static int? _parseTotalFromContentRange(String? contentRange) {
@@ -266,16 +313,15 @@ class DownloadService {
   @pragma('vm:entry-point')
   static Future<bool> isVideoDownloaded(String videoId) async {
     final video = await DatabaseService.instance.getDownloadedVideo(videoId);
-    if (video == null) return false;
-    if (video.status != 'completed') return false;
-    return File(video.filePath).existsSync();
+    if (video == null || video.status != 'completed') return false;
+    return await File(video.filePath).exists();
   }
 
   @pragma('vm:entry-point')
   static Future<String?> getDownloadedFilePath(String videoId) async {
     final video = await DatabaseService.instance.getDownloadedVideo(videoId);
     if (video == null || video.status != 'completed') return null;
-    return File(video.filePath).existsSync() ? video.filePath : null;
+    return await File(video.filePath).exists() ? video.filePath : null;
   }
 
   @pragma('vm:entry-point')
@@ -295,13 +341,21 @@ class DownloadService {
     _activeDownloads.add(videoId);
     await _ensureForegroundServiceActive();
     final dir = await getApplicationDocumentsDirectory();
-    final filePath = '${dir.path}/$videoId.mp3';
-    final file = File(filePath);
-    // Delete any old .m4a file for this videoId
-    final oldM4a = File('${dir.path}/$videoId.m4a');
-    if (await oldM4a.exists()) {
-      await oldM4a.delete();
+    final existingVariants = [
+      File('${dir.path}/$videoId.m4a'),
+      File('${dir.path}/$videoId.webm'),
+      File('${dir.path}/$videoId.mp3'),
+    ];
+    if (!resume) {
+      for (final f in existingVariants) {
+        if (await f.exists()) {
+          await f.delete();
+        }
+      }
     }
+    String filePath = '${dir.path}/$videoId.tmp';
+    String chosenExtension = 'tmp';
+    File file = File(filePath);
     _downloadCancelFlags[videoId] = false;
     _recentlyCancelledDownloads.remove(videoId);
     // Only insert a 'downloading' record if not resuming
@@ -327,7 +381,51 @@ class DownloadService {
       final sourceIdOrUrl = videoUrl.isNotEmpty
           ? videoUrl
           : 'https://www.youtube.com/watch?v=$videoId';
-      final extracted = await _extractor.getBestAudio(sourceIdOrUrl);
+      final extractSw = Stopwatch()..start();
+      final extracted = await _downloadExtractor.getBestAudio(sourceIdOrUrl);
+      final extractedHost = Uri.tryParse(extracted.url)?.host ?? 'unknown';
+      _log(
+        'Extraction $videoId took ${extractSw.elapsedMilliseconds}ms (host=$extractedHost)',
+      );
+      if (_looksLikeManifestUrl(extracted.url)) {
+        throw Exception(
+          'Download extractor returned manifest URL for $videoId ($extractedHost)',
+        );
+      }
+      chosenExtension = _guessExtension(extracted.mimeType, extracted.container);
+      _log(
+        'Download URL for $videoId host=$extractedHost mime=${extracted.mimeType} ext=${extracted.container ?? chosenExtension}',
+      );
+      filePath = '${dir.path}/$videoId.$chosenExtension';
+      file = File(filePath);
+      if (resume && !await file.exists()) {
+        // Try to resume from any existing variant if present
+        for (final candidate in existingVariants) {
+          if (await candidate.exists()) {
+            file = candidate;
+            filePath = candidate.path;
+            chosenExtension = candidate.uri.pathSegments.last.split('.').last;
+            break;
+          }
+        }
+      }
+      // Only insert a 'downloading' record if not resuming
+      if (!resume) {
+        final downloadingVideo = DownloadedVideo(
+          videoId: videoId,
+          title: title,
+          filePath: filePath,
+          size: 0,
+          duration: null,
+          channelName: channelName,
+          thumbnailUrl: thumbnailUrl,
+          downloadedAt: DateTime.now(),
+          status: 'downloading',
+        );
+        await DatabaseService.instance.addDownloadedVideo(downloadingVideo);
+        downloadedVideosChanged.value++;
+        isAnyDownloadInProgress.value = true;
+      }
       int fileSize = 0;
       int attempt = 0;
       bool shouldAttemptResume = resume;
@@ -433,6 +531,8 @@ class DownloadService {
           if (onProgress != null) {
             onProgress(received, totalForCallbacks);
           }
+          final throughputSw = Stopwatch()..start();
+          int lastLoggedBytes = received;
 
           await for (final data in response.stream) {
             if (_downloadCancelFlags[videoId] == true) {
@@ -461,6 +561,18 @@ class DownloadService {
             }
             if (knownRemoteLength != null) {
               _updateProgressState(videoId, received, knownRemoteLength);
+            }
+            if (throughputSw.elapsedMilliseconds >= 2000) {
+              final deltaBytes = received - lastLoggedBytes;
+              final seconds = throughputSw.elapsedMilliseconds / 1000;
+              if (seconds > 0) {
+                final mbps = (deltaBytes * 8) / seconds / 1e6;
+                _log(
+                  'Speed $videoId: ${mbps.toStringAsFixed(2)} Mbps, downloaded ${received ~/ 1024} KiB',
+                );
+              }
+              throughputSw.reset();
+              lastLoggedBytes = received;
             }
           }
 
@@ -524,6 +636,30 @@ class DownloadService {
       if (!exists || fileSize == 0) {
         print('Download failed or file is empty. Not adding to database.');
         // Mark as failed instead of deleting
+        final failedVideo = DownloadedVideo(
+          videoId: videoId,
+          title: title,
+          filePath: filePath,
+          size: 0,
+          duration: null,
+          channelName: channelName,
+          thumbnailUrl: thumbnailUrl,
+          downloadedAt: DateTime.now(),
+          status: 'failed',
+        );
+        await DatabaseService.instance.addDownloadedVideo(failedVideo);
+        downloadedVideosChanged.value++;
+        await _handleDownloadRemoved(videoId);
+        return null;
+      }
+      if (fileSize < _minValidDownloadBytes ||
+          await _isLikelyCorruptFile(file)) {
+        _log(
+          'Downloaded content for $videoId looks invalid (size=$fileSize); marking as failed',
+        );
+        try {
+          await file.delete();
+        } catch (_) {}
         final failedVideo = DownloadedVideo(
           videoId: videoId,
           title: title,
@@ -689,13 +825,16 @@ class DownloadService {
       if (await file.exists()) {
         await file.delete();
       }
-      final dbClient = await DatabaseService.instance.db;
-      await dbClient.delete(
-        'downloaded_videos',
-        where: 'videoId = ?',
-        whereArgs: [videoId],
-      );
+      await DatabaseService.instance.deleteDownloadedVideo(videoId);
     }
+    // Reflect deletion everywhere: clear saved-video download status and notify listeners.
+    await VideoRepository.instance.resetSavedVideo(videoId);
+    downloadedVideosChanged.value++;
+    await _updateIsAnyDownloadInProgress();
+    // Remove any stale progress entry.
+    final newMap = Map<String, double>.from(downloadProgressNotifier.value);
+    newMap.remove(videoId);
+    downloadProgressNotifier.value = newMap;
   }
 
   static Future<void> cancelDownload(String videoId) async {
@@ -942,26 +1081,38 @@ class DownloadService {
     await stopGlobalAudio();
 
     _log('setAudioSource(local): $filePath');
-    await globalAudioPlayer.setAudioSource(
-      ConcatenatingAudioSource(
-        children: [
-          AudioSource.uri(
-            Uri.file(filePath),
-            tag: MediaItem(
-              id: videoId,
-              album: 'YouTube Audio',
-              title: title ?? 'Audio',
-              artist: channelName ?? '',
-              artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
-                  ? Uri.parse(thumbnailUrl)
-                  : null,
+    try {
+      await globalAudioPlayer.setAudioSource(
+        ConcatenatingAudioSource(
+          children: [
+            AudioSource.uri(
+              Uri.file(filePath),
+              tag: MediaItem(
+                id: videoId,
+                album: 'YouTube Audio',
+                title: title ?? 'Audio',
+                artist: channelName ?? '',
+                artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
+                    ? Uri.parse(thumbnailUrl)
+                    : null,
+              ),
             ),
-          ),
-        ],
-      ),
-      initialIndex: 0,
-      initialPosition: Duration.zero,
-    );
+          ],
+        ),
+        initialIndex: 0,
+        initialPosition: Duration.zero,
+      );
+    } catch (e) {
+      _log('setAudioSource(local) failed for $videoId at $filePath: $e');
+      await _handleCorruptLocalPlayback(
+        videoId,
+        filePath,
+        title: title,
+        channelName: channelName,
+        thumbnailUrl: thumbnailUrl,
+      );
+      return;
+    }
 
     final playing = PlayingAudio(
       videoId: videoId,
@@ -975,7 +1126,19 @@ class DownloadService {
     _lastPersistedPositionMs[videoId] = 0;
     globalPlayingNotifier.value = playing;
     await _setSessionActive(true);
-    await globalAudioPlayer.play();
+    try {
+      await globalAudioPlayer.play();
+    } catch (e) {
+      _log('play local failed for $videoId: $e');
+      await _handleCorruptLocalPlayback(
+        videoId,
+        filePath,
+        title: title,
+        channelName: channelName,
+        thumbnailUrl: thumbnailUrl,
+      );
+      return;
+    }
     _log('play local $videoId');
     await saveGlobalPlayerState();
   }
@@ -1009,9 +1172,15 @@ class DownloadService {
     _log('prepare stream playback for $videoId');
     await stopGlobalAudio();
 
-    final extracted = await _extractor.getBestAudio(videoUrl);
+    final extractSw = Stopwatch()..start();
+    final extracted = await _streamExtractor.getBestAudio(videoUrl);
+    final extractedHost = Uri.tryParse(extracted.url)?.host ?? 'unknown';
+    _log(
+      'Extraction $videoId took ${extractSw.elapsedMilliseconds}ms (host=$extractedHost)',
+    );
 
     _log('setAudioSource(stream): ${extracted.url}');
+    final setSourceSw = Stopwatch()..start();
     await globalAudioPlayer.setAudioSource(
       AudioSource.uri(
         Uri.parse(extracted.url),
@@ -1026,6 +1195,7 @@ class DownloadService {
         ),
       ),
     );
+    _log('setAudioSource $videoId took ${setSourceSw.elapsedMilliseconds}ms');
 
     final playing = PlayingAudio(
       videoId: videoId,
@@ -1039,9 +1209,35 @@ class DownloadService {
 
     globalPlayingNotifier.value = playing;
     await _setSessionActive(true);
+    final playSw = Stopwatch()..start();
     await globalAudioPlayer.play();
+    _log('play() $videoId returned in ${playSw.elapsedMilliseconds}ms');
     _log('play stream $videoId');
     await saveGlobalPlayerState();
+  }
+
+  static Future<void> _handleCorruptLocalPlayback(
+    String videoId,
+    String filePath, {
+    String? title,
+    String? channelName,
+    String? thumbnailUrl,
+  }) async {
+    _log(
+      'local playback failed for $videoId at $filePath; deleting file and marking as corrupt',
+    );
+    try {
+      final f = File(filePath);
+      if (await f.exists()) {
+        await f.delete();
+      }
+    } catch (_) {}
+    await DatabaseService.instance.deleteDownloadedVideo(videoId);
+    downloadedVideosChanged.value++;
+    await _updateIsAnyDownloadInProgress();
+    showGlobalSnackBarMessage(
+      'Download looks corrupted. Please re-download this audio.',
+    );
   }
 
   static Future<void> togglePlayback() async {
@@ -1114,11 +1310,18 @@ class DownloadService {
         // Reattach progress notifier by reading file size and total size
         try {
           final dir = await getApplicationDocumentsDirectory();
-          final filePath = '${dir.path}/${video.videoId}.mp3';
-          final file = File(filePath);
+          final candidates = [
+            File('${dir.path}/${video.videoId}.m4a'),
+            File('${dir.path}/${video.videoId}.webm'),
+            File('${dir.path}/${video.videoId}.mp3'),
+          ];
+          final file = candidates.firstWhere(
+            (f) => f.existsSync(),
+            orElse: () => File('${dir.path}/${video.videoId}.m4a'),
+          );
           final received = await file.exists() ? await file.length() : 0;
 
-          final extracted = await _extractor.getBestAudio(
+          final extracted = await _downloadExtractor.getBestAudio(
             'https://www.youtube.com/watch?v=${video.videoId}',
           );
           final total = await _getRemoteContentLength(extracted.url);

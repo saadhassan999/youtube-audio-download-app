@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../core/snackbar_bus.dart';
@@ -154,24 +156,19 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
       return;
     }
 
-    final localPath = await DownloadService.getDownloadedFilePath(video.id);
-    final isLocal = localPath != null;
-
-    if (!isLocal && mounted) {
-      setState(() {
-        _isStreaming = true;
-      });
+    if (mounted) {
+      setState(() => _isStreaming = true);
     }
+    _schedulePlaybackFlow(video);
+  }
 
-    try {
-      await playVideo(context, video);
-    } finally {
-      if (!isLocal && mounted) {
-        setState(() {
-          _isStreaming = false;
-        });
-      }
-    }
+  void _schedulePlaybackFlow(Video video) {
+    // Defer the expensive playback setup until after the next frame.
+    unawaited(Future<void>.delayed(Duration.zero, () async {
+      await SchedulerBinding.instance.endOfFrame;
+      if (!mounted) return;
+      await _runPlaybackFlow(video);
+    }));
   }
 
   Future<void> _startDownload() async {
@@ -491,5 +488,23 @@ class _ChannelVideoTileState extends State<ChannelVideoTile>
         ],
       ),
     );
+  }
+
+  Future<void> _runPlaybackFlow(Video video) async {
+    // Yield before doing I/O so the UI can animate the loading spinner.
+    await Future<void>.delayed(Duration.zero);
+    bool isLocal = false;
+    try {
+      final localPath = await DownloadService.getDownloadedFilePath(video.id);
+      isLocal = localPath != null;
+      if (isLocal && mounted) {
+        setState(() => _isStreaming = false);
+      }
+      await playVideo(context, video);
+    } finally {
+      if (!isLocal && mounted) {
+        setState(() => _isStreaming = false);
+      }
+    }
   }
 }

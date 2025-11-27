@@ -241,7 +241,7 @@ class _ChannelSearchFieldState extends State<ChannelSearchField>
       });
       _focusNode.unfocus();
       _updateOverlay();
-      showGlobalSnackBarMessage('Saved to Saved Videos: ${video.title}');
+      showGlobalSnackBarMessage('Saved to Saved Audios: ${video.title}');
     } catch (e) {
       _showSnackBar('Failed to save video: $e');
     }

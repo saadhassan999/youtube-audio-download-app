@@ -7,9 +7,11 @@ plugins {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-    implementation("io.github.junkfood02.youtubedl-android:library:0.16.0")
+    // Updated to bundle Python 3.11+ and recent yt-dlp (fixes ImportError on Python 3.8)
+    implementation("io.github.junkfood02.youtubedl-android:library:0.17.2")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.14.3")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.14.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
 
 
@@ -33,7 +35,7 @@ android {
         applicationId = "com.example.youtube_audio_downloader"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -44,6 +46,13 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Ensure native libs (including libpython.zip.so) are extracted to filesystem
+            useLegacyPackaging = true
         }
     }
 }

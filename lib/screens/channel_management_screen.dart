@@ -2,6 +2,7 @@ import 'dart:io' show FileSystemException;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:provider/provider.dart';
 import '../core/fetch_exception.dart';
 import '../models/channel.dart';
@@ -323,7 +324,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
           child: Text(
-            'Saved Videos',
+            'Saved Audios',
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
           ),
         ),
@@ -421,13 +422,6 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   Widget build(BuildContext context) {
     final ime = MediaQuery.viewInsetsOf(context).bottom; // keyboard
     final safe = MediaQuery.paddingOf(context).bottom; // system nav
-    final topSafe = MediaQuery.paddingOf(context).top;
-    final bottomInset = ime > 0 ? ime : safe; // single source
-
-    // Debug log for Samsung verification
-    debugPrint(
-      '[Insets] IME=$ime SAFE=$safe TOP=$topSafe bottomInset=$bottomInset',
-    );
 
     final keyboardVisible = ime > 0;
     final contentBottomPadding = keyboardVisible ? 0.0 : safe;
@@ -922,6 +916,8 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
   bool _isStreaming = false;
   bool _isDownloading = false;
   bool _isRemoving = false;
+  bool _hasLocalFile = false;
+  bool _checkedLocalFile = false;
   late final VoidCallback _playingListener;
 
   @override
@@ -929,12 +925,22 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
     super.initState();
     _playingListener = _handlePlayingUpdate;
     DownloadService.globalPlayingNotifier.addListener(_playingListener);
+    _refreshLocalFileAvailability();
   }
 
   @override
   void dispose() {
     DownloadService.globalPlayingNotifier.removeListener(_playingListener);
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant SavedVideoTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.savedVideo.videoId != widget.savedVideo.videoId ||
+        oldWidget.savedVideo.status != widget.savedVideo.status) {
+      _refreshLocalFileAvailability();
+    }
   }
 
   void _handlePlayingUpdate() {
@@ -945,6 +951,17 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
     }
     setState(() {
       _isStreaming = false;
+    });
+  }
+
+  Future<void> _refreshLocalFileAvailability() async {
+    _checkedLocalFile = false;
+    final path =
+        await DownloadService.getDownloadedFilePath(widget.savedVideo.videoId);
+    if (!mounted) return;
+    setState(() {
+      _checkedLocalFile = true;
+      _hasLocalFile = path != null;
     });
   }
 
@@ -961,6 +978,8 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
   bool get _isDownloaded => widget.savedVideo.status == 'downloaded';
   bool get _isDownloadingStatus => widget.savedVideo.status == 'downloading';
   bool get _hasError => widget.savedVideo.status == 'error';
+  bool get _showDownloadButton =>
+      !_isDownloaded || !_checkedLocalFile || !_hasLocalFile;
 
   @override
   Widget build(BuildContext context) {
@@ -1073,11 +1092,11 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                             DownloadService.globalAudioPlayer.playerStateStream,
                         builder: (context, snapshot) {
                           final playerState = snapshot.data;
-                          final processingState =
-                              playerState?.processingState ??
-                              ProcessingState.idle;
-                          final isBuffering =
-                              isSameVideo &&
+                      final processingState =
+                          playerState?.processingState ??
+                          ProcessingState.idle;
+                      final isBuffering =
+                          isSameVideo &&
                               (processingState == ProcessingState.loading ||
                                   processingState == ProcessingState.buffering);
                           bool isPlaying = false;
@@ -1093,13 +1112,15 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                             }
                           }
                           final isLoading = _isStreaming || isBuffering;
+                          final isPlayableOffline =
+                              _isDownloaded && _hasLocalFile;
                           final label = isLoading
                               ? 'Loading...'
                               : isPlaying
                               ? 'Pause'
-                              : isSameVideo
+                              : (isSameVideo && isPlayableOffline)
                               ? 'Resume'
-                              : _isDownloaded
+                              : isPlayableOffline
                               ? 'Play Offline'
                               : 'Play';
 
@@ -1127,35 +1148,38 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: (_isDownloadingStatus || _isDownloading)
-                        ? null
-                        : () async {
-                            if (_isDownloadingStatus) return;
-                            setState(() => _isDownloading = true);
-                            try {
-                              await downloadVideo(
-                                context,
-                                _video,
-                                trackSavedVideo: true,
-                              );
-                            } finally {
-                              if (mounted) {
-                                setState(() => _isDownloading = false);
+                if (_showDownloadButton)
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: (_isDownloadingStatus || _isDownloading)
+                          ? null
+                          : () async {
+                              if (_isDownloadingStatus) return;
+                              setState(() => _isDownloading = true);
+                              try {
+                                await downloadVideo(
+                                  context,
+                                  _video,
+                                  trackSavedVideo: true,
+                                );
+                              } finally {
+                                if (mounted) {
+                                  setState(() => _isDownloading = false);
+                                }
+                                // Refresh local availability once the download flow completes.
+                                unawaited(_refreshLocalFileAvailability());
                               }
-                            }
-                          },
-                    icon: (_isDownloading || _isDownloadingStatus)
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.download),
-                    label: Text(_isDownloaded ? 'Re-download' : 'Download'),
+                            },
+                      icon: (_isDownloading || _isDownloadingStatus)
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.download),
+                      label: Text(_isDownloaded ? 'Re-download' : 'Download'),
+                    ),
                   ),
-                ),
               ],
             ),
           ],
@@ -1187,16 +1211,33 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
       return;
     }
 
-    final localPath = await DownloadService.getDownloadedFilePath(
-      widget.savedVideo.videoId,
-    );
-    final isLocal = localPath != null;
-
-    if (!isLocal && mounted) {
+    if (mounted) {
       setState(() => _isStreaming = true);
     }
+    _kickOffPlaybackFlow();
+  }
 
+  void _kickOffPlaybackFlow() {
+    // Yield to the next frame so the loading spinner animates before doing any I/O.
+    unawaited(Future<void>.delayed(Duration.zero, () async {
+      await SchedulerBinding.instance.endOfFrame;
+      if (!mounted) return;
+      await _runPlaybackFlow();
+    }));
+  }
+
+  Future<void> _runPlaybackFlow() async {
+    // Yield once before doing any heavy I/O so the loading spinner animates.
+    await Future<void>.delayed(Duration.zero);
+    bool isLocal = false;
     try {
+      final localPath = await DownloadService.getDownloadedFilePath(
+        widget.savedVideo.videoId,
+      );
+      isLocal = localPath != null;
+      if (isLocal && mounted) {
+        setState(() => _isStreaming = false);
+      }
       await playVideo(context, _video);
     } finally {
       if (!isLocal && mounted) {

@@ -4,6 +4,7 @@ import '../services/database_service.dart';
 import '../services/download_service.dart';
 import '../widgets/mini_player.dart';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'package:flutter_media_metadata/flutter_media_metadata.dart';
@@ -11,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../main.dart';
 import '../core/snackbar_bus.dart';
 import '../repositories/download_repository.dart';
+import 'package:flutter/scheduler.dart';
 
 class DownloadManagerScreen extends StatefulWidget {
   const DownloadManagerScreen({super.key});
@@ -28,7 +30,7 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
   bool _isRefreshing = false;
   String? _lastRefreshError;
   Future<void>? _refreshInFlight;
-  List<File> _orphanedFiles = [];
+  List<String> _orphanedFiles = [];
   late final VoidCallback _downloadsChangedListener;
 
   @override
@@ -49,7 +51,10 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
     DownloadService.downloadedVideosChanged.addListener(
       _downloadsChangedListener,
     );
-    _scanForOrphanedFiles();
+    // Defer heavy file scanning until after first frame to keep first paint smooth.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      unawaited(_scanForOrphanedFiles());
+    });
     DownloadService.resumeIncompleteDownloads();
   }
 
@@ -169,35 +174,39 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
   }
 
   Future<void> _scanForOrphanedFiles() async {
-    final dir = await getApplicationDocumentsDirectory();
-    final files = dir
-        .listSync()
-        .whereType<File>()
-        .where((f) => f.path.endsWith('.mp3'))
-        .toList();
     final dbVideos = await DatabaseService.instance.getDownloadedVideos();
-    final dbPaths = dbVideos.map((v) => v.filePath).toSet();
+    final dbPaths = dbVideos
+        .map((v) => v.filePath)
+        .whereType<String>()
+        .toList(growable: false);
+    final dir = await getApplicationDocumentsDirectory();
+    final orphanPaths = await _findOrphanedFilePaths(dir.path, dbPaths);
+    if (!mounted) return;
     setState(() {
-      _orphanedFiles = files.where((f) => !dbPaths.contains(f.path)).toList();
+      _orphanedFiles = orphanPaths;
     });
   }
 
   Future<void> _repairOrphanedFiles() async {
     for (final file in _orphanedFiles) {
       try {
-        final metadata = await MetadataRetriever.fromFile(file);
-        final title = metadata.trackName ?? file.uri.pathSegments.last;
+        final fileHandle = File(file);
+        final metadata = await MetadataRetriever.fromFile(fileHandle);
+        final title = metadata.trackName ?? fileHandle.uri.pathSegments.last;
         final channelName = metadata.albumName ?? '';
         final duration = metadata.trackDuration != null
             ? Duration(milliseconds: metadata.trackDuration!)
             : null;
-        final videoId = file.uri.pathSegments.last.replaceAll('.mp3', '');
-        final downloadedAt = file.statSync().modified;
+        final videoId = fileHandle.uri.pathSegments.last.replaceAll(
+          '.mp3',
+          '',
+        );
+        final downloadedAt = fileHandle.statSync().modified;
         final completedVideo = DownloadedVideo(
           videoId: videoId,
           title: title,
-          filePath: file.path,
-          size: await file.length(),
+          filePath: fileHandle.path,
+          size: await fileHandle.length(),
           duration: duration,
           channelName: channelName,
           thumbnailUrl: '',
@@ -324,257 +333,277 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
                             );
                           }
 
-                          return ListView(
+                          final rows = <_DownloadRow>[
+                            if (_lastRefreshError != null)
+                              _DownloadRow.error(_lastRefreshError!),
+                            const _DownloadRow.header('In-Progress'),
+                            if (inProgressVideos.isEmpty)
+                              const _DownloadRow.message('No active downloads.')
+                            else
+                              ...inProgressVideos.map(
+                                (video) => _DownloadRow.inProgress(video),
+                              ),
+                            const _DownloadRow.spacer(),
+                            const _DownloadRow.header('Completed'),
+                            if (completedList.isEmpty)
+                              const _DownloadRow.message('No completed downloads.')
+                            else
+                              ...completedList.map(
+                                (video) => _DownloadRow.completed(video),
+                              ),
+                          ];
+
+                          return ListView.builder(
                             physics: const AlwaysScrollableScrollPhysics(),
                             padding: const EdgeInsets.symmetric(
                               horizontal: 12,
                               vertical: 8,
                             ),
-                            children: [
-                              if (_lastRefreshError != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 12),
-                                  child: Row(
-                                    children: [
-                                      Icon(
-                                        Icons.info_outline,
-                                        color: Colors.orange[800],
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          _lastRefreshError!,
-                                          style: TextStyle(
-                                            color: Colors.orange[800],
-                                          ),
-                                        ),
-                                      ),
-                                      TextButton(
-                                        onPressed: _isRefreshing
-                                            ? null
-                                            : () => _refreshDownloads(),
-                                        child: _isRefreshing
-                                            ? const SizedBox(
-                                                width: 16,
-                                                height: 16,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              )
-                                            : const Text('Retry'),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              Text(
-                                'In-Progress',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                  color: Colors.orange[800],
-                                ),
-                              ),
-                              if (inProgressVideos.isEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 12,
-                                  ),
-                                  child: Text(
-                                    'No active downloads.',
-                                    style: TextStyle(color: Colors.grey[600]),
-                                  ),
-                                ),
-                              ...inProgressVideos.map((video) {
-                                return Card(
-                                  color: Colors.yellow[50],
-                                  elevation: 2,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                  child: ListTile(
-                                    leading: video.thumbnailUrl.isNotEmpty
-                                        ? ClipRRect(
-                                            borderRadius: BorderRadius.circular(
-                                              8,
-                                            ),
-                                            child: Image.network(
-                                              video.thumbnailUrl,
-                                              width: 56,
-                                              height: 56,
-                                              fit: BoxFit.cover,
-                                              errorBuilder:
-                                                  (
-                                                    context,
-                                                    error,
-                                                    stackTrace,
-                                                  ) => Container(
-                                                    width: 56,
-                                                    height: 56,
-                                                    color: Colors.grey.shade300,
-                                                    alignment: Alignment.center,
-                                                    child: Icon(
-                                                      Icons.music_note,
-                                                      color: Colors.grey[600],
-                                                    ),
-                                                  ),
-                                            ),
-                                          )
-                                        : const Icon(
-                                            Icons.music_note,
-                                            size: 56,
-                                          ),
-                                    title: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      mainAxisSize: MainAxisSize.min,
+                            itemCount: rows.length,
+                            itemBuilder: (context, index) {
+                              final row = rows[index];
+                              switch (row.type) {
+                                case _DownloadRowType.error:
+                                  return Padding(
+                                    padding:
+                                        const EdgeInsets.only(bottom: 12),
+                                    child: Row(
                                       children: [
-                                        Text(
-                                          video.title,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.bold,
+                                        Icon(
+                                          Icons.info_outline,
+                                          color: Colors.orange[800],
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            row.text!,
+                                            style: TextStyle(
+                                              color: Colors.orange[800],
+                                            ),
                                           ),
                                         ),
-                                        const SizedBox(height: 4),
-                                        ValueListenableBuilder<
-                                          Map<String, double>
-                                        >(
-                                          valueListenable: DownloadService
-                                              .downloadProgressNotifier,
-                                          builder: (context, progressMap, _) {
-                                            final progress =
-                                                progressMap[video.videoId] ??
-                                                0.0;
-                                            return Column(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                LinearProgressIndicator(
-                                                  value: progress > 0
-                                                      ? progress
-                                                      : null,
-                                                  minHeight: 4,
-                                                  backgroundColor:
-                                                      Colors.grey.shade300,
-                                                  valueColor:
-                                                      AlwaysStoppedAnimation<
-                                                        Color
-                                                      >(Colors.orange),
-                                                ),
-                                                const SizedBox(height: 4),
-                                                Text(
-                                                  progress > 0
-                                                      ? 'Downloading... ${(progress * 100).toStringAsFixed(0)}%'
-                                                      : 'Downloading...',
-                                                  style: TextStyle(
-                                                    fontSize: 13,
-                                                    color: Colors.orange[800],
-                                                    fontWeight: FontWeight.w500,
+                                        TextButton(
+                                          onPressed: _isRefreshing
+                                              ? null
+                                              : () => _refreshDownloads(),
+                                          child: _isRefreshing
+                                              ? const SizedBox(
+                                                  width: 16,
+                                                  height: 16,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                    strokeWidth: 2,
                                                   ),
-                                                ),
-                                              ],
-                                            );
-                                          },
+                                                )
+                                              : const Text('Retry'),
                                         ),
                                       ],
                                     ),
-                                    subtitle: Text(video.channelName),
-                                    trailing: IconButton(
-                                      icon: const Icon(
-                                        Icons.close,
-                                        color: Colors.red,
+                                  );
+                                case _DownloadRowType.header:
+                                  final isInProgress =
+                                      row.text == 'In-Progress';
+                                  return Text(
+                                    row.text ?? '',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16,
+                                      color: isInProgress
+                                          ? Colors.orange[800]
+                                          : Colors.green[800],
+                                    ),
+                                  );
+                                case _DownloadRowType.message:
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      vertical: 12,
+                                    ),
+                                    child: Text(
+                                      row.text ?? '',
+                                      style:
+                                          TextStyle(color: Colors.grey[600]),
+                                    ),
+                                  );
+                                case _DownloadRowType.spacer:
+                                  return const SizedBox(height: 18);
+                                case _DownloadRowType.inProgress:
+                                  final video = row.video!;
+                                  return Card(
+                                    color: Colors.yellow[50],
+                                    elevation: 2,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    child: ListTile(
+                                      leading: video.thumbnailUrl.isNotEmpty
+                                          ? ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              child: Image.network(
+                                                video.thumbnailUrl,
+                                                width: 56,
+                                                height: 56,
+                                                fit: BoxFit.cover,
+                                                errorBuilder:
+                                                    (
+                                                      context,
+                                                      error,
+                                                      stackTrace,
+                                                    ) => Container(
+                                                      width: 56,
+                                                      height: 56,
+                                                      color:
+                                                          Colors.grey.shade300,
+                                                      alignment:
+                                                          Alignment.center,
+                                                      child: Icon(
+                                                        Icons.music_note,
+                                                        color: Colors.grey[600],
+                                                      ),
+                                                    ),
+                                              ),
+                                            )
+                                          : const Icon(
+                                              Icons.music_note,
+                                              size: 56,
+                                            ),
+                                      title: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            video.title,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          ValueListenableBuilder<
+                                            Map<String, double>
+                                          >(
+                                            valueListenable: DownloadService
+                                                .downloadProgressNotifier,
+                                            builder:
+                                                (context, progressMap, _) {
+                                              final progress =
+                                                  progressMap[video.videoId] ??
+                                                  0.0;
+                                              return Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  LinearProgressIndicator(
+                                                    value: progress > 0
+                                                        ? progress
+                                                        : null,
+                                                    minHeight: 4,
+                                                    backgroundColor:
+                                                        Colors.grey.shade300,
+                                                    valueColor:
+                                                        AlwaysStoppedAnimation<
+                                                          Color
+                                                        >(Colors.orange),
+                                                  ),
+                                                  const SizedBox(height: 4),
+                                                  Text(
+                                                    progress > 0
+                                                        ? 'Downloading... ${(progress * 100).toStringAsFixed(0)}%'
+                                                        : 'Downloading...',
+                                                    style: TextStyle(
+                                                      fontSize: 13,
+                                                      color: Colors.orange[800],
+                                                      fontWeight:
+                                                          FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                ],
+                                              );
+                                            },
+                                          ),
+                                        ],
                                       ),
-                                      tooltip: 'Cancel Download',
-                                      onPressed: () async {
-                                        await DownloadService.cancelDownload(
-                                          video.videoId,
+                                      subtitle: Text(video.channelName),
+                                      trailing: IconButton(
+                                        icon: const Icon(
+                                          Icons.close,
+                                          color: Colors.red,
+                                        ),
+                                        tooltip: 'Cancel Download',
+                                        onPressed: () async {
+                                          await DownloadService.cancelDownload(
+                                            video.videoId,
+                                          );
+                                          await _loadDownloadedVideos(
+                                            forceRefresh: true,
+                                          );
+                                        },
+                                      ),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                        vertical: 4,
+                                        horizontal: 8,
+                                      ),
+                                    ),
+                                  );
+                                case _DownloadRowType.completed:
+                                  final video = row.video!;
+                                  return Card(
+                                    elevation: 2,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    child: _AudioProgressListTile(
+                                      video: video,
+                                      onDelete: () async {
+                                        final confirm =
+                                            await showDialog<bool>(
+                                          context: context,
+                                          builder: (context) => AlertDialog(
+                                            title: const Text('Delete Audio'),
+                                            content: const Text(
+                                              'Are you sure you want to delete this audio?',
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  context,
+                                                ).pop(false),
+                                                child: const Text('No'),
+                                              ),
+                                              TextButton(
+                                                onPressed: () => Navigator.of(
+                                                  context,
+                                                ).pop(true),
+                                                child: const Text('Yes'),
+                                              ),
+                                            ],
+                                          ),
                                         );
-                                        await _loadDownloadedVideos(
-                                          forceRefresh: true,
-                                        );
+                                        if (confirm == true) {
+                                          await DownloadService
+                                              .deleteDownloadedAudio(
+                                            video.videoId,
+                                          );
+                                          await _loadDownloadedVideos(
+                                            forceRefresh: true,
+                                          );
+                                          if (!mounted) return;
+                                          showGlobalSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Deleted: ${video.title}',
+                                              ),
+                                            ),
+                                          );
+                                        }
                                       },
                                     ),
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      vertical: 4,
-                                      horizontal: 8,
-                                    ),
-                                  ),
-                                );
-                              }),
-                              const SizedBox(height: 18),
-                              Text(
-                                'Completed',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                  color: Colors.green[800],
-                                ),
-                              ),
-                              if (completedList.isEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 12,
-                                  ),
-                                  child: Text(
-                                    'No completed downloads.',
-                                    style: TextStyle(color: Colors.grey[600]),
-                                  ),
-                                ),
-                              ...completedList.map((video) {
-                                return Card(
-                                  elevation: 2,
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(14),
-                                  ),
-                                  child: _AudioProgressListTile(
-                                    video: video,
-                                    onDelete: () async {
-                                      final confirm = await showDialog<bool>(
-                                        context: context,
-                                        builder: (context) => AlertDialog(
-                                          title: const Text('Delete Audio'),
-                                          content: const Text(
-                                            'Are you sure you want to delete this audio?',
-                                          ),
-                                          actions: [
-                                            TextButton(
-                                              onPressed: () => Navigator.of(
-                                                context,
-                                              ).pop(false),
-                                              child: const Text('No'),
-                                            ),
-                                            TextButton(
-                                              onPressed: () => Navigator.of(
-                                                context,
-                                              ).pop(true),
-                                              child: const Text('Yes'),
-                                            ),
-                                          ],
-                                        ),
-                                      );
-                                      if (confirm == true) {
-                                        await DownloadService.deleteDownloadedAudio(
-                                          video.videoId,
-                                        );
-                                        await _loadDownloadedVideos(
-                                          forceRefresh: true,
-                                        );
-                                        if (!mounted) return;
-                                        showGlobalSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                              'Deleted: ${video.title}',
-                                            ),
-                                          ),
-                                        );
-                                      }
-                                    },
-                                  ),
-                                );
-                              }),
-                            ],
+                                  );
+                              }
+                            },
                           );
                         },
                       ),
@@ -585,6 +614,27 @@ class _DownloadManagerScreenState extends State<DownloadManagerScreen>
       ),
     );
   }
+}
+
+enum _DownloadRowType { header, inProgress, completed, message, spacer, error }
+
+class _DownloadRow {
+  const _DownloadRow._(this.type, {this.video, this.text});
+  const _DownloadRow.header(String text)
+      : this._(_DownloadRowType.header, text: text);
+  const _DownloadRow.inProgress(DownloadedVideo video)
+      : this._(_DownloadRowType.inProgress, video: video);
+  const _DownloadRow.completed(DownloadedVideo video)
+      : this._(_DownloadRowType.completed, video: video);
+  const _DownloadRow.message(String text)
+      : this._(_DownloadRowType.message, text: text);
+  const _DownloadRow.spacer() : this._(_DownloadRowType.spacer);
+  const _DownloadRow.error(String text)
+      : this._(_DownloadRowType.error, text: text);
+
+  final _DownloadRowType type;
+  final DownloadedVideo? video;
+  final String? text;
 }
 
 class _AudioProgressListTile extends StatefulWidget {
@@ -617,6 +667,18 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
     DownloadService.globalPlayingNotifier.addListener(
       _globalPlayingNotifierListener,
     );
+  }
+
+  @override
+  void didUpdateWidget(covariant _AudioProgressListTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.video.videoId != widget.video.videoId) {
+      _positionSub?.cancel();
+      _progress = 0.0;
+      _durationMs = 0;
+      _loadInitialProgress();
+      _updateProgressAndListeningState();
+    }
   }
 
   @override
@@ -701,9 +763,6 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
         final isPlayingThisAudio =
             (playing?.videoId == video.videoId) &&
             (playing?.isPlaying ?? false);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _updateProgressAndListeningState();
-        });
         Color barColor;
         if (_progress >= 0.95) {
           barColor = Colors.green;
@@ -830,4 +889,25 @@ class _AudioProgressListTileState extends State<_AudioProgressListTile> {
       },
     );
   }
+}
+
+@pragma('vm:entry-point')
+Future<List<String>> _findOrphanedFilePaths(
+  String directoryPath,
+  List<String> dbPaths,
+) async {
+  final dbPathList = List<String>.from(dbPaths);
+  return Isolate.run(() {
+    final dbSet = dbPathList.toSet();
+    final directory = Directory(directoryPath);
+    if (!directory.existsSync()) return <String>[];
+    final orphaned = directory
+        .listSync(followLinks: false)
+        .whereType<File>()
+        .where((file) => file.path.endsWith('.mp3'))
+        .map((file) => file.path)
+        .where((path) => !dbSet.contains(path))
+        .toList(growable: false);
+    return orphaned;
+  });
 }

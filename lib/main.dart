@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:ui';
 import 'package:provider/provider.dart';
 import 'screens/channel_management_screen.dart';
 import 'screens/download_manager_screen.dart';
@@ -23,6 +24,24 @@ import 'theme/theme_notifier.dart';
 const fetchTask = 'fetchNewVideosTask';
 
 final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
+
+void _setupFrameTimingLogging() {
+  assert(() {
+    WidgetsBinding.instance.addTimingsCallback(_logFrameTimings);
+    return true;
+  }());
+}
+
+void _logFrameTimings(List<FrameTiming> timings) {
+  for (final timing in timings) {
+    final totalMs = timing.totalSpan.inMilliseconds;
+    if (totalMs > 16) {
+      debugPrint(
+        '[FrameTiming] total=${totalMs}ms build=${timing.buildDuration.inMilliseconds}ms raster=${timing.rasterDuration.inMilliseconds}ms',
+      );
+    }
+  }
+}
 
 Future<void> _requestNotificationPermission() async {
   try {
@@ -201,6 +220,7 @@ Future<void> backgroundTask() async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  _setupFrameTimingLogging();
   await _requestNotificationPermission();
   print('Notification permission requested');
 
