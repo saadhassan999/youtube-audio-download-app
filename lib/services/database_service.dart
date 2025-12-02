@@ -7,6 +7,7 @@ import '../models/downloaded_video.dart';
 import '../utils/constants.dart';
 import 'package:synchronized/synchronized.dart';
 import '../models/saved_video.dart';
+import '../models/stream_cache_entry.dart';
 
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._init();
@@ -25,7 +26,7 @@ class DatabaseService {
     final path = join(dbPath, kAppDbName);
     return await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _createDB,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -39,7 +40,9 @@ class DatabaseService {
               channelName TEXT,
               thumbnailUrl TEXT,
               downloadedAt TEXT,
-              status TEXT
+              status TEXT,
+              lastStreamUrl TEXT,
+              lastStreamUrlUpdatedAt TEXT
             )
           ''');
         }
@@ -50,6 +53,21 @@ class DatabaseService {
         }
         if (oldVersion < 4) {
           await _createSavedVideosTable(db);
+        }
+        if (oldVersion < 5) {
+          await db.execute(
+            'ALTER TABLE downloaded_videos ADD COLUMN lastStreamUrl TEXT',
+          );
+          await db.execute(
+            'ALTER TABLE downloaded_videos ADD COLUMN lastStreamUrlUpdatedAt TEXT',
+          );
+          await db.execute(
+            'ALTER TABLE saved_videos ADD COLUMN lastStreamUrl TEXT',
+          );
+          await db.execute(
+            'ALTER TABLE saved_videos ADD COLUMN lastStreamUrlUpdatedAt TEXT',
+          );
+          await _createStreamCacheTable(db);
         }
       },
     );
@@ -92,10 +110,13 @@ class DatabaseService {
         channelName TEXT,
         thumbnailUrl TEXT,
         downloadedAt TEXT,
-        status TEXT
+        status TEXT,
+        lastStreamUrl TEXT,
+        lastStreamUrlUpdatedAt TEXT
       )
     ''');
     await _createSavedVideosTable(db);
+    await _createStreamCacheTable(db);
   }
 
   Future<void> _createSavedVideosTable(Database db) async {
@@ -114,12 +135,24 @@ class DatabaseService {
         localPath TEXT,
         bytesTotal INTEGER,
         bytesDownloaded INTEGER,
+        lastStreamUrl TEXT,
+        lastStreamUrlUpdatedAt TEXT,
         UNIQUE(videoId)
       )
     ''');
     await db.execute(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_videos_video_id ON saved_videos(videoId)',
     );
+  }
+
+  Future<void> _createStreamCacheTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS stream_cache (
+        videoId TEXT PRIMARY KEY,
+        lastStreamUrl TEXT,
+        lastStreamUrlUpdatedAt TEXT
+      )
+    ''');
   }
 
   // Channel CRUD
@@ -234,6 +267,23 @@ class DatabaseService {
     });
   }
 
+  @pragma('vm:entry-point')
+  Future<void> updateDownloadedVideoFields(
+    String videoId,
+    Map<String, Object?> values,
+  ) async {
+    if (values.isEmpty) return;
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      await dbClient.update(
+        'downloaded_videos',
+        values,
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
+    });
+  }
+
   Future<void> upsertSavedVideo(SavedVideo video) async {
     await _dbLock.synchronized(() async {
       final dbClient = await db;
@@ -296,6 +346,94 @@ class DatabaseService {
         where: 'videoId = ?',
         whereArgs: [videoId],
       );
+    });
+  }
+
+  Future<StreamCacheEntry?> getStreamCache(String videoId) async {
+    return await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      StreamCacheEntry? best;
+
+      Future<void> considerTable(String table) async {
+        final rows = await dbClient.query(
+          table,
+          columns: ['videoId', 'lastStreamUrl', 'lastStreamUrlUpdatedAt'],
+          where: 'videoId = ?',
+          whereArgs: [videoId],
+          limit: 1,
+        );
+        if (rows.isEmpty) return;
+        final map = rows.first;
+        final updatedAtStr = map['lastStreamUrlUpdatedAt'] as String?;
+        final updatedAt =
+            updatedAtStr != null ? DateTime.tryParse(updatedAtStr) : null;
+        final candidate = StreamCacheEntry(
+          videoId: map['videoId'] as String,
+          lastStreamUrl: map['lastStreamUrl'] as String?,
+          lastStreamUrlUpdatedAt: updatedAt,
+          source: table,
+        );
+        if (best == null) {
+          best = candidate;
+          return;
+        }
+        final bestTime = best!.lastStreamUrlUpdatedAt;
+        if (candidate.lastStreamUrlUpdatedAt != null &&
+            (bestTime == null ||
+                candidate.lastStreamUrlUpdatedAt!.isAfter(bestTime))) {
+          best = candidate;
+        }
+      }
+
+      await considerTable('saved_videos');
+      await considerTable('downloaded_videos');
+      await considerTable('stream_cache');
+      return best;
+    });
+  }
+
+  Future<void> saveStreamCache(
+    String videoId,
+    String streamUrl,
+    DateTime updatedAt,
+  ) async {
+    final values = {
+      'lastStreamUrl': streamUrl,
+      'lastStreamUrlUpdatedAt': updatedAt.toIso8601String(),
+    };
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      final updatedSaved = await dbClient.update(
+        'saved_videos',
+        values,
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
+      final updatedDownloaded = await dbClient.update(
+        'downloaded_videos',
+        values,
+        where: 'videoId = ?',
+        whereArgs: [videoId],
+      );
+      if (updatedSaved == 0 && updatedDownloaded == 0) {
+        await dbClient.insert(
+          'stream_cache',
+          {
+            'videoId': videoId,
+            ...values,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      } else {
+        await dbClient.insert(
+          'stream_cache',
+          {
+            'videoId': videoId,
+            ...values,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
     });
   }
 

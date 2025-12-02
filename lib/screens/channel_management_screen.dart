@@ -180,6 +180,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       setState(() {
         _savedVideos = videos;
       });
+      DownloadService.prefetchStreamsForSavedVideos(videos);
     });
   }
 

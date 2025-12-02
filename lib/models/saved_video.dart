@@ -14,6 +14,8 @@ class SavedVideo {
   final String? localPath;
   final int? bytesTotal;
   final int? bytesDownloaded;
+  final String? lastStreamUrl;
+  final DateTime? lastStreamUrlUpdatedAt;
 
   SavedVideo({
     this.id,
@@ -29,6 +31,8 @@ class SavedVideo {
     this.localPath,
     this.bytesTotal,
     this.bytesDownloaded,
+    this.lastStreamUrl,
+    this.lastStreamUrlUpdatedAt,
   });
 
   SavedVideo copyWith({
@@ -45,6 +49,8 @@ class SavedVideo {
     String? localPath,
     int? bytesTotal,
     int? bytesDownloaded,
+    String? lastStreamUrl,
+    DateTime? lastStreamUrlUpdatedAt,
   }) {
     return SavedVideo(
       id: id ?? this.id,
@@ -60,6 +66,9 @@ class SavedVideo {
       localPath: localPath ?? this.localPath,
       bytesTotal: bytesTotal ?? this.bytesTotal,
       bytesDownloaded: bytesDownloaded ?? this.bytesDownloaded,
+      lastStreamUrl: lastStreamUrl ?? this.lastStreamUrl,
+      lastStreamUrlUpdatedAt:
+          lastStreamUrlUpdatedAt ?? this.lastStreamUrlUpdatedAt,
     );
   }
 
@@ -77,6 +86,8 @@ class SavedVideo {
         'localPath': localPath,
         'bytesTotal': bytesTotal,
         'bytesDownloaded': bytesDownloaded,
+        'lastStreamUrl': lastStreamUrl,
+        'lastStreamUrlUpdatedAt': lastStreamUrlUpdatedAt?.toIso8601String(),
       };
 
   factory SavedVideo.fromMap(Map<String, dynamic> map) => SavedVideo(
@@ -97,6 +108,10 @@ class SavedVideo {
         localPath: map['localPath'] as String?,
         bytesTotal: map['bytesTotal'] as int?,
         bytesDownloaded: map['bytesDownloaded'] as int?,
+        lastStreamUrl: map['lastStreamUrl'] as String?,
+        lastStreamUrlUpdatedAt: map['lastStreamUrlUpdatedAt'] != null
+            ? DateTime.tryParse(map['lastStreamUrlUpdatedAt'] as String)
+            : null,
       );
 
   static SavedVideo fromVideo(

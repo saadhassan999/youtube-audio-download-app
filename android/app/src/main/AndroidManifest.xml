@@ -12,7 +12,7 @@
     
     <application
         android:label="YT AudioBox"
-        android:name="${applicationName}"
+        android:name=".DownloadApplication"
         android:icon="@mipmap/ic_launcher"
         android:extractNativeLibs="true">
         <activity

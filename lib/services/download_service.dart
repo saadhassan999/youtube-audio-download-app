@@ -12,7 +12,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/snackbar_bus.dart';
 import '../models/downloaded_video.dart';
+import '../models/saved_video.dart';
 import '../models/video.dart';
+import '../models/stream_cache_entry.dart';
 import '../repositories/video_repository.dart';
 import 'composite_extractor.dart';
 import 'database_service.dart';
@@ -65,6 +67,22 @@ class PlayingAudio {
   }
 }
 
+class _RestoredSource {
+  final String videoId;
+  final AudioSource audioSource;
+  final PlayingAudio playingAudio;
+  final Duration initialPosition;
+  final String description;
+
+  const _RestoredSource({
+    required this.videoId,
+    required this.audioSource,
+    required this.playingAudio,
+    required this.initialPosition,
+    required this.description,
+  });
+}
+
 class DownloadService {
   // Global audio player singleton, initialized after JustAudioBackground.init
   static late final AudioPlayer globalAudioPlayer;
@@ -105,6 +123,11 @@ class DownloadService {
     primaryTimeout: const Duration(seconds: 60),
     runFallbackInIsolate: true,
   );
+  static const Duration _streamCacheTtl = Duration(hours: 2);
+  static final Map<String, StreamCacheEntry> _memoryStreamCache = {};
+  static final Map<String, Future<String>> _streamExtractionInFlight = {};
+  static final Map<String, Future<void>> _streamPrefetchInFlight = {};
+  static const int _savedVideosPrefetchLimit = 4;
   static const MethodChannel _foregroundChannel = MethodChannel(
     'download_foreground_service',
   );
@@ -200,6 +223,111 @@ class DownloadService {
     } catch (_) {
       return null;
     }
+  }
+
+  static bool _isFreshStreamCache(StreamCacheEntry? entry) {
+    if (entry == null) return false;
+    if (entry.lastStreamUrl == null || entry.lastStreamUrl!.isEmpty) {
+      return false;
+    }
+    final updatedAt = entry.lastStreamUrlUpdatedAt;
+    if (updatedAt == null) return false;
+    final age = DateTime.now().toUtc().difference(updatedAt);
+    return age < _streamCacheTtl;
+  }
+
+  static Future<StreamCacheEntry?> _getCachedStreamEntry(String videoId) async {
+    final mem = _memoryStreamCache[videoId];
+    StreamCacheEntry? best = mem;
+    final dbEntry = await DatabaseService.instance.getStreamCache(videoId);
+    if (dbEntry != null) {
+      final dbTime = dbEntry.lastStreamUrlUpdatedAt;
+      final bestTime = best?.lastStreamUrlUpdatedAt;
+      if (best == null) {
+        best = dbEntry;
+      } else if (dbTime != null &&
+          (bestTime == null || dbTime.isAfter(bestTime))) {
+        best = dbEntry;
+      }
+    }
+    if (best != null) {
+      _memoryStreamCache[videoId] = best;
+    }
+    return best;
+  }
+
+  static Future<void> _persistStreamCache(
+    String videoId,
+    String streamUrl,
+    DateTime updatedAt,
+  ) async {
+    final entry = StreamCacheEntry(
+      videoId: videoId,
+      lastStreamUrl: streamUrl,
+      lastStreamUrlUpdatedAt: updatedAt,
+      source: 'db',
+    );
+    _memoryStreamCache[videoId] = entry;
+    await DatabaseService.instance.saveStreamCache(videoId, streamUrl, updatedAt);
+  }
+
+  static Future<String> _refreshStreamUrl(
+    String videoId,
+    String videoUrl, {
+    String reason = 'playback',
+  }) {
+    final inFlight = _streamExtractionInFlight[videoId];
+    if (inFlight != null) return inFlight;
+
+    final future = () async {
+      final sourceIdOrUrl = videoUrl.isNotEmpty
+          ? videoUrl
+          : 'https://www.youtube.com/watch?v=$videoId';
+      final extractSw = Stopwatch()..start();
+      final extracted = await _streamExtractor.getBestAudio(sourceIdOrUrl);
+      final extractedHost = Uri.tryParse(extracted.url)?.host ?? 'unknown';
+      _log(
+        'Extraction $videoId ($reason) took ${extractSw.elapsedMilliseconds}ms (host=$extractedHost)',
+      );
+      final now = DateTime.now().toUtc();
+      await _persistStreamCache(videoId, extracted.url, now);
+      return extracted.url;
+    }();
+
+    _streamExtractionInFlight[videoId] = future;
+    future.whenComplete(() {
+      _streamExtractionInFlight.remove(videoId);
+    });
+    return future;
+  }
+
+  static bool _isRecoverableStreamError(Object error) {
+    if (error is PlayerException) {
+      final code = '${error.code}'.toLowerCase();
+      final message = (error.message ?? '').toString().toLowerCase();
+      if (_looksLikeExpiredError(code) || _looksLikeExpiredError(message)) {
+        return true;
+      }
+    }
+    if (error is PlatformException) {
+      final message = (error.message ?? '').toLowerCase();
+      if (_looksLikeExpiredError(message)) {
+        return true;
+      }
+    }
+    final text = error.toString().toLowerCase();
+    return _looksLikeExpiredError(text);
+  }
+
+  static bool _looksLikeExpiredError(String text) {
+    return text.contains('403') ||
+        text.contains('401') ||
+        text.contains('410') ||
+        text.contains('forbidden') ||
+        text.contains('expired') ||
+        text.contains('not found') ||
+        text.contains('timeout') ||
+        text.contains('timed out');
   }
 
   static Future<void> _ensureForegroundServiceActive() async {
@@ -911,27 +1039,61 @@ class DownloadService {
     }
   }
 
+  static Future<void> _clearRestoredPlayback({String? reason}) async {
+    final reasonText =
+        reason != null && reason.isNotEmpty ? ' ($reason)' : '';
+    _log('restoreGlobalPlayerState: clearing restored session$reasonText');
+    try {
+      await globalAudioPlayer.stop();
+    } catch (e) {
+      _log('restoreGlobalPlayerState: stop after clear failed: $e');
+    }
+    globalPlayingNotifier.value = null;
+    await _setSessionActive(false);
+  }
+
   // Call this on app startup
   static Future<void> restoreGlobalPlayerState() async {
     final prefs = await SharedPreferences.getInstance();
     final storedSessionActive = prefs.getBool(_sessionActiveKey) ?? false;
     _hasActiveSession = storedSessionActive;
     globalSessionActive.value = storedSessionActive;
+    _log(
+      'restoreGlobalPlayerState: sessionActive=$storedSessionActive, lastVideoId=${prefs.getString(_lastVideoIdKey)}, state=${prefs.getString(_lastVideoStateKey)}, position=${prefs.getInt(_lastVideoPositionKey)}',
+    );
     if (!storedSessionActive) {
       return;
     }
+
+    final restorationLog = <String>[];
+    final restoredSources = <_RestoredSource>[];
     final lastVideoId = prefs.getString(_lastVideoIdKey);
     final lastPosition = prefs.getInt(_lastVideoPositionKey);
     final lastState = prefs.getString(_lastVideoStateKey);
+
     if (lastVideoId != null) {
       final video = await DatabaseService.instance.getDownloadedVideo(
         lastVideoId,
       );
-      if (video != null && File(video.filePath).existsSync()) {
-        await globalAudioPlayer.setAudioSource(
-          ConcatenatingAudioSource(
-            children: [
-              AudioSource.uri(
+      if (video == null) {
+        restorationLog.add(
+          'item videoId=$lastVideoId status=skipped reason=missing-db-entry',
+        );
+      } else {
+        final file = File(video.filePath);
+        final exists = file.existsSync();
+        if (!exists) {
+          restorationLog.add(
+            'item videoId=${video.videoId} type=file path=${video.filePath} status=skipped reason=file-missing',
+          );
+        } else {
+          final initialPosition = lastPosition != null && lastPosition > 0
+              ? Duration(milliseconds: lastPosition)
+              : Duration.zero;
+          restoredSources.add(
+            _RestoredSource(
+              videoId: video.videoId,
+              audioSource: AudioSource.uri(
                 Uri.file(video.filePath),
                 tag: MediaItem(
                   id: video.videoId,
@@ -943,33 +1105,97 @@ class DownloadService {
                       : null,
                 ),
               ),
-            ],
-          ),
-          initialIndex: 0,
-          initialPosition: lastPosition != null && lastPosition > 0
-              ? Duration(milliseconds: lastPosition)
-              : Duration.zero,
-        );
-        globalPlayingNotifier.value = PlayingAudio(
-          videoId: video.videoId,
-          isPlaying: lastState == 'playing',
-          title: video.title,
-          channelName: video.channelName,
-          thumbnailUrl: video.thumbnailUrl,
-          filePath: video.filePath,
-          isLocal: true,
-        );
-        _lastPersistedPositionMs[video.videoId] =
-            lastPosition ?? video.duration?.inMilliseconds ?? 0;
-        await _setSessionActive(true);
-        if (lastState == 'playing') {
-          await globalAudioPlayer.play();
+              playingAudio: PlayingAudio(
+                videoId: video.videoId,
+                isPlaying: lastState == 'playing',
+                title: video.title,
+                channelName: video.channelName,
+                thumbnailUrl: video.thumbnailUrl,
+                filePath: video.filePath,
+                isLocal: true,
+              ),
+              initialPosition: initialPosition,
+              description: 'file:${video.filePath}',
+            ),
+          );
+          restorationLog.add(
+            'item videoId=${video.videoId} type=file path=${video.filePath} status=accepted',
+          );
+          _lastPersistedPositionMs[video.videoId] =
+              lastPosition ?? video.duration?.inMilliseconds ?? 0;
         }
-      } else {
-        await _setSessionActive(false);
       }
     } else {
-      await _setSessionActive(false);
+      restorationLog.add('item status=skipped reason=no-last-video-id');
+    }
+
+    _log(
+      'restoreGlobalPlayerState: restored ${restoredSources.length} of ${restorationLog.length} candidate item(s)',
+    );
+    for (final entry in restorationLog) {
+      _log('restoreGlobalPlayerState: $entry');
+    }
+
+    if (restoredSources.isEmpty) {
+      await _clearRestoredPlayback(reason: 'no valid restored items');
+      return;
+    }
+
+    final initialIndex = 0;
+    final initialPosition = restoredSources.first.initialPosition;
+    try {
+      await globalAudioPlayer.setAudioSource(
+        ConcatenatingAudioSource(
+          children:
+              restoredSources.map((source) => source.audioSource).toList(),
+        ),
+        initialIndex: initialIndex,
+        initialPosition: initialPosition,
+      );
+    } catch (e) {
+      _log('restoreGlobalPlayerState: setAudioSources failed: $e');
+      bool loaded = false;
+      for (final source in restoredSources) {
+        final uriDescription = source.audioSource is UriAudioSource
+            ? (source.audioSource as UriAudioSource).uri.toString()
+            : source.description;
+        try {
+          await globalAudioPlayer.setAudioSource(
+            source.audioSource,
+            initialPosition: source.initialPosition,
+          );
+          _log(
+            'restoreGlobalPlayerState: loaded fallback source for ${source.videoId} ($uriDescription)',
+          );
+          restoredSources
+            ..clear()
+            ..add(source);
+          loaded = true;
+          break;
+        } catch (inner) {
+          _log(
+            'restoreGlobalPlayerState: skipping ${source.videoId} due to load error: $inner',
+          );
+        }
+      }
+
+      if (!loaded) {
+        await _clearRestoredPlayback(reason: 'no source could be loaded');
+        return;
+      }
+    }
+
+    final restoredPlaying = restoredSources.first.playingAudio;
+    globalPlayingNotifier.value = restoredPlaying;
+    await _setSessionActive(true);
+    if (restoredPlaying.isPlaying) {
+      try {
+        await globalAudioPlayer.play();
+      } catch (e) {
+        _log(
+          'restoreGlobalPlayerState: play failed for ${restoredPlaying.videoId}: $e',
+        );
+      }
     }
   }
 
@@ -1151,6 +1377,7 @@ class DownloadService {
     String? thumbnailUrl,
   }) async {
     ensureInitialized();
+    final totalSw = Stopwatch()..start();
     final current = globalPlayingNotifier.value;
     final isSameStream =
         current?.videoId == videoId && !(current?.isLocal ?? true);
@@ -1172,48 +1399,165 @@ class DownloadService {
     _log('prepare stream playback for $videoId');
     await stopGlobalAudio();
 
-    final extractSw = Stopwatch()..start();
-    final extracted = await _streamExtractor.getBestAudio(videoUrl);
-    final extractedHost = Uri.tryParse(extracted.url)?.host ?? 'unknown';
-    _log(
-      'Extraction $videoId took ${extractSw.elapsedMilliseconds}ms (host=$extractedHost)',
-    );
+    final cacheEntry = await _getCachedStreamEntry(videoId);
+    final cacheFresh = _isFreshStreamCache(cacheEntry);
+    final hasCacheEntry = cacheEntry != null;
+    final cacheAge = cacheEntry?.lastStreamUrlUpdatedAt != null
+        ? DateTime.now()
+            .toUtc()
+            .difference(cacheEntry!.lastStreamUrlUpdatedAt!)
+            .inMinutes
+        : null;
+    String cacheLabel;
+    if (cacheFresh) {
+      cacheLabel =
+          'hit (age=${cacheAge != null ? '$cacheAge m' : 'unknown'}, source=${cacheEntry?.source})';
+      _log('stream cache hit for $videoId $cacheLabel');
+    } else if (cacheEntry != null) {
+      cacheLabel =
+          'stale (age=${cacheAge != null ? '$cacheAge m' : 'unknown'}, source=${cacheEntry.source})';
+      _log('stream cache stale for $videoId $cacheLabel');
+    } else {
+      cacheLabel = 'miss';
+      _log('stream cache miss for $videoId');
+    }
 
-    _log('setAudioSource(stream): ${extracted.url}');
-    final setSourceSw = Stopwatch()..start();
-    await globalAudioPlayer.setAudioSource(
-      AudioSource.uri(
-        Uri.parse(extracted.url),
-        tag: MediaItem(
-          id: videoId,
-          album: 'YouTube Audio',
-          title: title ?? 'Audio',
-          artist: channelName ?? '',
-          artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
-              ? Uri.parse(thumbnailUrl)
-              : null,
+    String? resolvedUrl = cacheFresh ? cacheEntry!.lastStreamUrl : null;
+    bool retriedAfterCacheFailure = false;
+
+    Future<void> setSourceAndPlay(
+      String url, {
+      required bool isRetry,
+    }) async {
+      _log('setAudioSource(stream): $url');
+      final setSourceSw = Stopwatch()..start();
+      await globalAudioPlayer.setAudioSource(
+        AudioSource.uri(
+          Uri.parse(url),
+          tag: MediaItem(
+            id: videoId,
+            album: 'YouTube Audio',
+            title: title ?? 'Audio',
+            artist: channelName ?? '',
+            artUri: thumbnailUrl != null && thumbnailUrl.isNotEmpty
+                ? Uri.parse(thumbnailUrl)
+                : null,
+          ),
         ),
-      ),
-    );
-    _log('setAudioSource $videoId took ${setSourceSw.elapsedMilliseconds}ms');
+      );
+      _log(
+        'setAudioSource $videoId took ${setSourceSw.elapsedMilliseconds}ms (cache=$cacheLabel, retry=$isRetry)',
+      );
 
-    final playing = PlayingAudio(
-      videoId: videoId,
-      isPlaying: true,
-      title: title,
-      channelName: channelName,
-      thumbnailUrl: thumbnailUrl,
-      streamUrl: extracted.url,
-      isLocal: false,
-    );
+      final playing = PlayingAudio(
+        videoId: videoId,
+        isPlaying: true,
+        title: title,
+        channelName: channelName,
+        thumbnailUrl: thumbnailUrl,
+        streamUrl: url,
+        isLocal: false,
+      );
 
-    globalPlayingNotifier.value = playing;
-    await _setSessionActive(true);
-    final playSw = Stopwatch()..start();
-    await globalAudioPlayer.play();
-    _log('play() $videoId returned in ${playSw.elapsedMilliseconds}ms');
-    _log('play stream $videoId');
+      globalPlayingNotifier.value = playing;
+      await _setSessionActive(true);
+      final playSw = Stopwatch()..start();
+      await globalAudioPlayer.play();
+      _log(
+        'play() $videoId returned in ${playSw.elapsedMilliseconds}ms (retry=$isRetry)',
+      );
+    }
+
+    try {
+      final url = resolvedUrl ??
+          await _refreshStreamUrl(
+            videoId,
+            videoUrl,
+            reason: hasCacheEntry ? 'stale-refresh' : 'playback-miss',
+          );
+      resolvedUrl = url;
+      await setSourceAndPlay(url, isRetry: false);
+    } catch (e) {
+      final shouldRetry = cacheFresh && _isRecoverableStreamError(e);
+      _log(
+        'play stream first attempt failed for $videoId (cache=$cacheLabel): $e',
+      );
+      if (shouldRetry) {
+        retriedAfterCacheFailure = true;
+        _log('retrying stream extraction for $videoId after cache failure');
+        final refreshedUrl = await _refreshStreamUrl(
+          videoId,
+          videoUrl,
+          reason: 'cache-refresh',
+        );
+        resolvedUrl = refreshedUrl;
+        await setSourceAndPlay(refreshedUrl, isRetry: true);
+      } else {
+        rethrow;
+      }
+    }
+
+    late final PlayerState readyState;
+    try {
+      readyState = await globalAudioPlayer.playerStateStream.firstWhere(
+        (state) =>
+            state.processingState == ProcessingState.ready ||
+            state.playing ||
+            state.processingState == ProcessingState.buffering,
+      ).timeout(const Duration(seconds: 8));
+    } catch (_) {
+      readyState = globalAudioPlayer.playerState;
+    }
+
+    _log(
+      'play stream $videoId cache=$cacheLabel retry=$retriedAfterCacheFailure ready=${readyState.processingState} playing=${readyState.playing} total=${totalSw.elapsedMilliseconds}ms',
+    );
     await saveGlobalPlayerState();
+  }
+
+  static void prefetchStreamsForSavedVideos(
+    Iterable<SavedVideo> savedVideos, {
+    int limit = _savedVideosPrefetchLimit,
+  }) {
+    final candidates = <String>{};
+    for (final saved in savedVideos) {
+      if (candidates.length >= limit) break;
+      final hasLocal = saved.status == 'downloaded' &&
+          (saved.localPath != null && saved.localPath!.isNotEmpty);
+      if (hasLocal) continue; // No need to fetch stream URL for local playback.
+      candidates.add(saved.videoId);
+    }
+    if (candidates.isEmpty) return;
+
+    for (final id in candidates) {
+      if (_streamPrefetchInFlight.containsKey(id)) {
+        continue;
+      }
+      final future = () async {
+        try {
+          final cache = await _getCachedStreamEntry(id);
+          if (_isFreshStreamCache(cache)) {
+            _log(
+              'prefetch cache hit for $id (source=${cache?.source ?? 'unknown'})',
+            );
+            return;
+          }
+          _log('prefetching stream URL for $id');
+          await _refreshStreamUrl(
+            id,
+            'https://www.youtube.com/watch?v=$id',
+            reason: 'prefetch',
+          );
+          _log('prefetch complete for $id');
+        } catch (e) {
+          _log('prefetch failed for $id: $e');
+        }
+      }();
+      _streamPrefetchInFlight[id] = future;
+      future.whenComplete(() {
+        _streamPrefetchInFlight.remove(id);
+      });
+    }
   }
 
   static Future<void> _handleCorruptLocalPlayback(

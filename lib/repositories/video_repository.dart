@@ -62,6 +62,8 @@ class VideoRepository {
       localPath: existing?.localPath,
       bytesTotal: existing?.bytesTotal,
       bytesDownloaded: existing?.bytesDownloaded,
+      lastStreamUrl: existing?.lastStreamUrl,
+      lastStreamUrlUpdatedAt: existing?.lastStreamUrlUpdatedAt,
     );
 
     await DatabaseService.instance.upsertSavedVideo(savedVideo);

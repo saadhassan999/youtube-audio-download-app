@@ -8,6 +8,8 @@ class DownloadedVideo {
   final String thumbnailUrl;
   final DateTime downloadedAt;
   final String status; // e.g., 'completed', 'downloading', 'failed'
+  final String? lastStreamUrl;
+  final DateTime? lastStreamUrlUpdatedAt;
 
   DownloadedVideo({
     required this.videoId,
@@ -19,6 +21,8 @@ class DownloadedVideo {
     required this.thumbnailUrl,
     required this.downloadedAt,
     required this.status,
+    this.lastStreamUrl,
+    this.lastStreamUrlUpdatedAt,
   });
 
   Map<String, dynamic> toMap() => {
@@ -31,6 +35,8 @@ class DownloadedVideo {
     'thumbnailUrl': thumbnailUrl,
     'downloadedAt': downloadedAt.toIso8601String(),
     'status': status,
+    'lastStreamUrl': lastStreamUrl,
+    'lastStreamUrlUpdatedAt': lastStreamUrlUpdatedAt?.toIso8601String(),
   };
 
   factory DownloadedVideo.fromMap(Map<String, dynamic> map) => DownloadedVideo(
@@ -43,5 +49,9 @@ class DownloadedVideo {
     thumbnailUrl: map['thumbnailUrl'],
     downloadedAt: DateTime.parse(map['downloadedAt']),
     status: map['status'],
+    lastStreamUrl: map['lastStreamUrl'] as String?,
+    lastStreamUrlUpdatedAt: map['lastStreamUrlUpdatedAt'] != null
+        ? DateTime.tryParse(map['lastStreamUrlUpdatedAt'])
+        : null,
   );
 } 
