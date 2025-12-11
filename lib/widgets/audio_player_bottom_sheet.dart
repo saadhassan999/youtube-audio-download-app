@@ -1,10 +1,12 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+
+import '../core/snackbar_bus.dart';
 import '../models/downloaded_video.dart';
-import '../services/database_service.dart';
 import '../services/download_service.dart';
 import 'audio_controls.dart';
-import 'dart:io';
-import '../core/snackbar_bus.dart';
 
 class AudioPlayerBottomSheet {
   static void show(BuildContext context) {
@@ -29,24 +31,32 @@ class _AudioPlayerBottomSheetContentState
   List<DownloadedVideo> _playlist = [];
   int _currentIndex = -1;
   late final VoidCallback _playingListener;
+  late final VoidCallback _downloadsListener;
 
   @override
   void initState() {
     super.initState();
     _playingListener = _syncWithCurrentlyPlaying;
     DownloadService.globalPlayingNotifier.addListener(_playingListener);
-    _loadPlaylist();
+    _downloadsListener = () {
+      unawaited(_loadPlaylist(forceRefresh: true));
+    };
+    DownloadService.downloadedVideosChanged.addListener(_downloadsListener);
+    unawaited(_loadPlaylist());
     _syncWithCurrentlyPlaying();
   }
 
   @override
   void dispose() {
+    DownloadService.downloadedVideosChanged.removeListener(_downloadsListener);
     DownloadService.globalPlayingNotifier.removeListener(_playingListener);
     super.dispose();
   }
 
-  Future<void> _loadPlaylist() async {
-    final playlist = await DatabaseService.instance.getDownloadedVideos();
+  Future<void> _loadPlaylist({bool forceRefresh = false}) async {
+    final playlist = await DownloadService.buildDownloadedQueueFromDb(
+      forceRefresh: forceRefresh,
+    );
     if (!mounted) return;
     final playing = DownloadService.globalPlayingNotifier.value;
     final index = playing == null

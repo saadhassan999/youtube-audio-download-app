@@ -23,6 +23,11 @@ import 'notification_service.dart';
 import 'youtube_explode_extractor.dart';
 import 'yt_dlp_native_extractor.dart';
 
+enum PlaybackContext {
+  streamed,
+  downloaded,
+}
+
 // Helper class to hold playing state
 class PlayingAudio {
   final String videoId;
@@ -33,6 +38,7 @@ class PlayingAudio {
   final String? filePath;
   final String? streamUrl;
   final bool isLocal;
+  final PlaybackContext playbackContext;
 
   const PlayingAudio({
     required this.videoId,
@@ -43,6 +49,7 @@ class PlayingAudio {
     this.filePath,
     this.streamUrl,
     this.isLocal = true,
+    this.playbackContext = PlaybackContext.downloaded,
   });
 
   PlayingAudio copyWith({
@@ -53,6 +60,7 @@ class PlayingAudio {
     String? filePath,
     String? streamUrl,
     bool? isLocal,
+    PlaybackContext? playbackContext,
   }) {
     return PlayingAudio(
       videoId: videoId,
@@ -63,6 +71,7 @@ class PlayingAudio {
       filePath: filePath ?? this.filePath,
       streamUrl: streamUrl ?? this.streamUrl,
       isLocal: isLocal ?? this.isLocal,
+      playbackContext: playbackContext ?? this.playbackContext,
     );
   }
 }
@@ -132,9 +141,32 @@ class DownloadService {
     'download_foreground_service',
   );
   static bool _isForegroundServiceActive = false;
+  static List<DownloadedVideo> _downloadedQueueCache = const [];
+  static bool _downloadedQueueValid = false;
+  static Future<List<DownloadedVideo>>? _downloadedQueueBuildInFlight;
+  static bool _downloadedQueueListenerAttached = false;
+  static bool _autoplayInProgress = false;
 
   static void _log(String message) {
     debugPrint('[DownloadService] $message');
+  }
+
+  static String _describePlaybackContext(PlayingAudio? playing) {
+    if (playing == null) return 'none';
+    final context =
+        playing.playbackContext == PlaybackContext.streamed ? 'stream' : 'downloaded';
+    final origin = playing.isLocal ? 'local' : 'stream';
+    return '$context/$origin';
+  }
+
+  static void _invalidateDownloadedQueue() {
+    _downloadedQueueValid = false;
+  }
+
+  static void _ensureQueueListenerAttached() {
+    if (_downloadedQueueListenerAttached) return;
+    downloadedVideosChanged.addListener(_invalidateDownloadedQueue);
+    _downloadedQueueListenerAttached = true;
   }
 
   static bool _looksLikeManifestUrl(String url) {
@@ -356,7 +388,52 @@ class DownloadService {
 
   static Future<void> _handleDownloadRemoved(String videoId) async {
     _activeDownloads.remove(videoId);
+    _invalidateDownloadedQueue();
     await _stopForegroundServiceIfIdle();
+  }
+
+  static Future<List<DownloadedVideo>> buildDownloadedQueueFromDb({
+    bool forceRefresh = false,
+  }) {
+    _ensureQueueListenerAttached();
+    if (_downloadedQueueValid && !forceRefresh) {
+      return Future.value(_downloadedQueueCache);
+    }
+    final inFlight = _downloadedQueueBuildInFlight;
+    if (inFlight != null) return inFlight;
+
+    final future = _loadDownloadedQueue();
+    _downloadedQueueBuildInFlight = future;
+    return future.whenComplete(() {
+      _downloadedQueueBuildInFlight = null;
+    });
+  }
+
+  static Future<List<DownloadedVideo>> _loadDownloadedQueue() async {
+    final downloads = await DatabaseService.instance.getDownloadedVideos();
+    final filtered = <DownloadedVideo>[];
+    for (final video in downloads) {
+      if (video.status != 'completed') continue;
+      if (video.filePath.isEmpty) continue;
+      final exists = await File(video.filePath).exists();
+      if (!exists) {
+        _log(
+          'autoplay queue skip videoId=${video.videoId} path=${video.filePath} reason=file-missing',
+        );
+        continue;
+      }
+      filtered.add(video);
+    }
+    _downloadedQueueCache = List.unmodifiable(filtered);
+    _downloadedQueueValid = true;
+    _log('autoplay queue built size=${filtered.length}');
+    return _downloadedQueueCache;
+  }
+
+  static Future<int?> getIndexOfDownloadedItem(String videoId) async {
+    final queue = await buildDownloadedQueueFromDb();
+    final idx = queue.indexWhere((v) => v.videoId == videoId);
+    return idx >= 0 ? idx : null;
   }
 
   static Future<void> init() async {
@@ -385,11 +462,12 @@ class DownloadService {
   static void ensureInitialized() {
     if (_initialized) return;
     _initialized = true;
+    _ensureQueueListenerAttached();
     globalPlayingNotifier.addListener(_updateMiniPlayerVisibility);
     globalAudioPlayer.playerStateStream.listen((state) {
       final current = globalPlayingNotifier.value;
       _log(
-        'playerState update: processing=${state.processingState}, playing=${state.playing}',
+        'playerState update: processing=${state.processingState}, playing=${state.playing}, ctx=${_describePlaybackContext(current)}, videoId=${current?.videoId ?? 'none'}',
       );
 
       if (state.processingState == ProcessingState.idle &&
@@ -406,8 +484,12 @@ class DownloadService {
         }
       }
 
-      if (state.processingState == ProcessingState.completed ||
-          state.processingState == ProcessingState.idle) {
+      if (state.processingState == ProcessingState.completed) {
+        unawaited(_handlePlaybackCompleted(current));
+        return;
+      }
+
+      if (state.processingState == ProcessingState.idle) {
         globalPlayingNotifier.value = null;
       } else if (state.playing) {
         if (current != null) {
@@ -1113,6 +1195,7 @@ class DownloadService {
                 thumbnailUrl: video.thumbnailUrl,
                 filePath: video.filePath,
                 isLocal: true,
+                playbackContext: PlaybackContext.downloaded,
               ),
               initialPosition: initialPosition,
               description: 'file:${video.filePath}',
@@ -1348,6 +1431,7 @@ class DownloadService {
       thumbnailUrl: thumbnailUrl,
       filePath: filePath,
       isLocal: true,
+      playbackContext: PlaybackContext.downloaded,
     );
     _lastPersistedPositionMs[videoId] = 0;
     globalPlayingNotifier.value = playing;
@@ -1457,6 +1541,7 @@ class DownloadService {
         thumbnailUrl: thumbnailUrl,
         streamUrl: url,
         isLocal: false,
+        playbackContext: PlaybackContext.streamed,
       );
 
       globalPlayingNotifier.value = playing;
@@ -1557,6 +1642,205 @@ class DownloadService {
       future.whenComplete(() {
         _streamPrefetchInFlight.remove(id);
       });
+    }
+  }
+
+  static Future<bool> playDownloadedAtIndex(int index) async {
+    final queue = await buildDownloadedQueueFromDb();
+    if (queue.isEmpty) {
+      _log(
+        'playDownloadedAtIndex: queue empty (requested index=$index); stopping',
+      );
+      await globalAudioPlayer.stop();
+      globalPlayingNotifier.value = null;
+      await saveGlobalPlayerState();
+      return false;
+    }
+    return _playDownloadedQueue(queue, index);
+  }
+
+  static Future<bool> _playDownloadedQueue(
+    List<DownloadedVideo> queue,
+    int startIndex,
+  ) async {
+    if (startIndex < 0 || startIndex >= queue.length) {
+      _log(
+        'autoplay: start index $startIndex out of range for queue size ${queue.length}',
+      );
+      try {
+        await globalAudioPlayer.stop();
+      } catch (_) {}
+      globalPlayingNotifier.value = null;
+      await saveGlobalPlayerState();
+      return false;
+    }
+
+    for (int idx = startIndex; idx < queue.length; idx++) {
+      final item = queue[idx];
+      final filePath = item.filePath;
+      final exists = await File(filePath).exists();
+      if (!exists) {
+        _log(
+          'autoplay skip videoId=${item.videoId} path=$filePath reason=file-missing next=${idx + 1 < queue.length ? idx + 1 : 'stop'}',
+        );
+        continue;
+      }
+      try {
+        await globalAudioPlayer.setAudioSource(
+          AudioSource.uri(
+            Uri.file(filePath),
+            tag: MediaItem(
+              id: item.videoId,
+              album: 'YouTube Audio',
+              title: item.title,
+              artist: item.channelName,
+              artUri: item.thumbnailUrl.isNotEmpty
+                  ? Uri.parse(item.thumbnailUrl)
+                  : null,
+            ),
+          ),
+          initialPosition: Duration.zero,
+        );
+        final playing = PlayingAudio(
+          videoId: item.videoId,
+          isPlaying: true,
+          title: item.title,
+          channelName: item.channelName,
+          thumbnailUrl: item.thumbnailUrl,
+          filePath: filePath,
+          isLocal: true,
+          playbackContext: PlaybackContext.downloaded,
+        );
+        _lastPersistedPositionMs[item.videoId] = 0;
+        globalPlayingNotifier.value = playing;
+        await _setSessionActive(true);
+        await globalAudioPlayer.play();
+        _log(
+          'autoplay playing downloaded videoId=${item.videoId} index=$idx/${queue.length - 1}',
+        );
+        await saveGlobalPlayerState();
+        return true;
+      } catch (e) {
+        _log(
+          'autoplay skip videoId=${item.videoId} path=$filePath reason=playback-error error=$e next=${idx + 1 < queue.length ? idx + 1 : 'stop'}',
+        );
+        try {
+          await globalAudioPlayer.stop();
+        } catch (_) {}
+        globalPlayingNotifier.value = null;
+      }
+    }
+
+    _log('autoplay: no playable downloaded items remaining; stopping');
+    try {
+      await globalAudioPlayer.stop();
+    } catch (_) {}
+    globalPlayingNotifier.value = null;
+    await saveGlobalPlayerState();
+    return false;
+  }
+
+  static Future<void> autoplayNextDownloadedFrom(
+    int currentIndex, {
+    List<DownloadedVideo>? queue,
+  }) async {
+    final list = queue ?? await buildDownloadedQueueFromDb(forceRefresh: true);
+    final nextIndex = currentIndex + 1;
+    if (nextIndex >= list.length) {
+      _log(
+        'autoplay: completed index=$currentIndex at end of queue (len=${list.length}); stopping',
+      );
+      try {
+        await globalAudioPlayer.stop();
+      } catch (_) {}
+      globalPlayingNotifier.value = null;
+      await saveGlobalPlayerState();
+      return;
+    }
+    final started = await _playDownloadedQueue(list, nextIndex);
+    if (!started) {
+      _log(
+        'autoplay: no playable downloads after index=$currentIndex; stopping',
+      );
+    }
+  }
+
+  static Future<void> _handlePlaybackCompleted(PlayingAudio? finished) async {
+    if (_autoplayInProgress) {
+      _log('autoplay: completion ignored because handler already running');
+      return;
+    }
+    _autoplayInProgress = true;
+    final videoId = finished?.videoId ?? 'unknown';
+    final contextLabel = _describePlaybackContext(finished);
+
+    try {
+      final queue = await buildDownloadedQueueFromDb(forceRefresh: true);
+      if (queue.isEmpty) {
+        _log(
+          'autoplay: track complete videoId=$videoId context=$contextLabel action=stop reason=no-downloaded-items',
+        );
+        try {
+          await globalAudioPlayer.stop();
+        } catch (_) {}
+        globalPlayingNotifier.value = null;
+        await saveGlobalPlayerState();
+        return;
+      }
+
+      if (finished == null) {
+        _log(
+          'autoplay: completion with null context, defaulting to start downloaded queue from 0',
+        );
+        await _playDownloadedQueue(queue, 0);
+        return;
+      }
+
+      if (finished.playbackContext == PlaybackContext.streamed) {
+        _log(
+          'autoplay: stream finished videoId=$videoId action=start-download-queue-from-0 len=${queue.length}',
+        );
+        await _playDownloadedQueue(queue, 0);
+        return;
+      }
+
+      final currentIndex =
+          queue.indexWhere((element) => element.videoId == finished.videoId);
+      if (currentIndex == -1) {
+        _log(
+          'autoplay: downloaded item videoId=$videoId not found in queue; stopping',
+        );
+        try {
+          await globalAudioPlayer.stop();
+        } catch (_) {}
+        globalPlayingNotifier.value = null;
+        await saveGlobalPlayerState();
+        return;
+      }
+
+      final nextIndex = currentIndex + 1;
+      if (nextIndex >= queue.length) {
+        _log(
+          'autoplay: downloaded item videoId=$videoId at end of queue; stopping',
+        );
+        try {
+          await globalAudioPlayer.stop();
+        } catch (_) {}
+        globalPlayingNotifier.value = null;
+        await saveGlobalPlayerState();
+        return;
+      }
+
+      _log(
+        'autoplay: downloaded item complete videoId=$videoId action=play-next index=$nextIndex/${queue.length - 1}',
+      );
+      await _playDownloadedQueue(queue, nextIndex);
+    } catch (e) {
+      _log(
+        'autoplay: error handling completion for videoId=$videoId context=$contextLabel error=$e',
+      );
+    } finally {
+      _autoplayInProgress = false;
     }
   }
 
