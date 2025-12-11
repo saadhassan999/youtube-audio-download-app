@@ -547,8 +547,17 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                               controller.isLoadingMore ||
                               _isRefreshingAll;
                           final error = controller.error;
-                          final String? errorMessage = error != null
-                              ? error.toString()
+                          final bool hasError = error != null;
+                          final bool isOfflineError = error?.isOffline ?? false;
+                          final String? errorTitle = hasError
+                              ? (isOfflineError
+                                    ? "You're offline"
+                                    : "Couldn't refresh this channel.")
+                              : null;
+                          final String? errorBody = hasError
+                              ? (isOfflineError
+                                    ? 'Connect to the internet and tap Retry to refresh this channel.'
+                                    : 'Please try again later.')
                               : null;
 
                           return Padding(
@@ -651,8 +660,9 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                             _controllers
                                                 .remove(channel.id)
                                                 ?.dispose();
-                                            _channelRefreshes
-                                                .remove(channel.id);
+                                            _channelRefreshes.remove(
+                                              channel.id,
+                                            );
                                           });
                                           await _loadChannels();
                                           if (!mounted) return;
@@ -682,17 +692,35 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                                       child: Column(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
-                                          Text(
-                                            errorMessage ??
-                                                'No videos available yet.',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: Colors.grey[700],
+                                          if (errorTitle != null) ...[
+                                            Text(
+                                              errorTitle,
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w600,
+                                                color: Colors.grey[800],
+                                              ),
                                             ),
-                                          ),
-                                          if (errorMessage != null)
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              errorBody ?? '',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: Colors.grey[700],
+                                              ),
+                                            ),
+                                          ] else
+                                            Text(
+                                              'No videos available yet.',
+                                              textAlign: TextAlign.center,
+                                              style: TextStyle(
+                                                color: Colors.grey[700],
+                                              ),
+                                            ),
+                                          if (hasError)
                                             const SizedBox(height: 12),
-                                          if (errorMessage != null)
+                                          if (hasError)
                                             _buildInlineActionButton(
                                               label: 'Retry',
                                               isBusy: inlineBusy,
@@ -957,8 +985,9 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
 
   Future<void> _refreshLocalFileAvailability() async {
     _checkedLocalFile = false;
-    final path =
-        await DownloadService.getDownloadedFilePath(widget.savedVideo.videoId);
+    final path = await DownloadService.getDownloadedFilePath(
+      widget.savedVideo.videoId,
+    );
     if (!mounted) return;
     setState(() {
       _checkedLocalFile = true;
@@ -1093,11 +1122,11 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
                             DownloadService.globalAudioPlayer.playerStateStream,
                         builder: (context, snapshot) {
                           final playerState = snapshot.data;
-                      final processingState =
-                          playerState?.processingState ??
-                          ProcessingState.idle;
-                      final isBuffering =
-                          isSameVideo &&
+                          final processingState =
+                              playerState?.processingState ??
+                              ProcessingState.idle;
+                          final isBuffering =
+                              isSameVideo &&
                               (processingState == ProcessingState.loading ||
                                   processingState == ProcessingState.buffering);
                           bool isPlaying = false;
@@ -1220,11 +1249,13 @@ class _SavedVideoTileState extends State<SavedVideoTile> {
 
   void _kickOffPlaybackFlow() {
     // Yield to the next frame so the loading spinner animates before doing any I/O.
-    unawaited(Future<void>.delayed(Duration.zero, () async {
-      await SchedulerBinding.instance.endOfFrame;
-      if (!mounted) return;
-      await _runPlaybackFlow();
-    }));
+    unawaited(
+      Future<void>.delayed(Duration.zero, () async {
+        await SchedulerBinding.instance.endOfFrame;
+        if (!mounted) return;
+        await _runPlaybackFlow();
+      }),
+    );
   }
 
   Future<void> _runPlaybackFlow() async {
