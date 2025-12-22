@@ -1,4 +1,4 @@
-import 'package:intl/intl.dart';
+import '../utils/youtube_utils.dart';
 
 class Channel {
   final String id;
@@ -26,13 +26,13 @@ class Channel {
       return 'Subscribers hidden';
     }
 
-    final count = subscriberCount ?? 0;
-    final locale = Intl.getCurrentLocale();
-    final formatter = NumberFormat.compact(
-      locale: Intl.defaultLocale ?? (locale.isEmpty ? null : locale),
-    );
-    final formatted = formatter.format(count);
-    return '$formatted subscribers';
+    if (subscriberCount == null) {
+      return '— subscribers';
+    }
+
+    final formatted = formatSubscriberCount(subscriberCount);
+    final label = formatted.isNotEmpty ? formatted : subscriberCount.toString();
+    return '$label subscribers';
   }
 
   Map<String, dynamic> toMap() => {

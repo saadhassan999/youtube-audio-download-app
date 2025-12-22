@@ -20,6 +20,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_notifier.dart';
+import 'settings/app_settings.dart';
 
 const fetchTask = 'fetchNewVideosTask';
 
@@ -266,8 +267,16 @@ void main() async {
   await DownloadService.restoreGlobalPlayerState();
   final themeNotifier = ThemeNotifier();
   await themeNotifier.loadTheme();
+  final appSettings = AppSettingsNotifier();
+  await appSettings.load();
   runApp(
-    ChangeNotifierProvider.value(value: themeNotifier, child: const MyApp()),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider<ThemeNotifier>.value(value: themeNotifier),
+        ChangeNotifierProvider<AppSettingsNotifier>.value(value: appSettings),
+      ],
+      child: const MyApp(),
+    ),
   );
 }
 

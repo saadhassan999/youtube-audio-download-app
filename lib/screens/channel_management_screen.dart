@@ -9,20 +9,20 @@ import '../models/channel.dart';
 import '../models/video.dart';
 import '../models/saved_video.dart';
 import '../models/downloaded_video.dart';
-import '../repositories/channel_repository.dart';
 import '../repositories/video_repository.dart';
-import '../config/app_config.dart';
 import '../services/database_service.dart';
 import '../services/download_service.dart';
-import '../services/youtube_api_service.dart';
+import '../repositories/channel_uploads_cache_repository.dart';
 import '../utils/youtube_utils.dart';
 import '../widgets/channel_search_field.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/channel_video_tile.dart';
 import '../core/snackbar_bus.dart';
 import 'download_manager_screen.dart';
+import 'add_item_screen.dart';
 import '../theme/theme_notifier.dart';
-import '../controllers/channel_uploads_controller.dart';
+import '../models/channel_upload_cache_entry.dart';
+import '../settings/app_settings.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:async';
@@ -38,13 +38,10 @@ class ChannelManagementScreen extends StatefulWidget {
 class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     with SingleTickerProviderStateMixin {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  final ChannelRepository _channelRepository = ChannelRepository.instance;
-  final Map<String, _ChannelSectionState> _channelStates = {};
+  final ChannelUploadsCacheRepository _uploadsRepo =
+      ChannelUploadsCacheRepository.instance;
+  final Map<String, _ChannelUploadsState> _uploadsStates = {};
   final Map<String, Future<void>> _channelRefreshes = {};
-  final Map<String, ChannelUploadsController> _controllers = {};
-  late final YoutubeApiService _ytService = YoutubeApiService(
-    AppConfig.youtubeApiKey,
-  );
   List<Channel> _channels = [];
   List<SavedVideo> _savedVideos = [];
   bool _isRefreshingAll = false;
@@ -58,6 +55,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final notifier = context.watch<ThemeNotifier>();
+    final appSettings = context.watch<AppSettingsNotifier>();
     return Drawer(
       child: Container(
         color: theme.drawerTheme.backgroundColor ?? colorScheme.surface,
@@ -105,6 +103,21 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
               value: notifier.isDarkMode,
               onChanged: (value) => notifier.toggleTheme(value),
             ),
+            SwitchListTile.adaptive(
+              secondary: const Icon(Icons.search_off),
+              title: const Text('Enable API search'),
+              subtitle: const Text('Uses YouTube Data API quota'),
+              value: appSettings.enableApiSearch,
+              onChanged: (value) => appSettings.setEnableApiSearch(value),
+            ),
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text('Add channel or video'),
+              onTap: () {
+                Navigator.pop(context);
+                _openAddScreen();
+              },
+            ),
             const Divider(),
             ListTile(
               leading: const Icon(Icons.email_outlined),
@@ -129,6 +142,16 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
       context,
       MaterialPageRoute(builder: (context) => DownloadManagerScreen()),
     );
+  }
+
+  Future<void> _openAddScreen() async {
+    final added = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (context) => const AddItemScreen()),
+    );
+    if (added == true) {
+      await _loadChannels();
+    }
   }
 
   Future<void> _initConnectivity() async {
@@ -189,9 +212,6 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     _connectivitySub?.cancel();
     _savedVideosSub?.cancel();
     _logoController.dispose();
-    for (final controller in _controllers.values) {
-      controller.dispose();
-    }
     _scroll.dispose();
     super.dispose();
   }
@@ -201,34 +221,58 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     if (!mounted) return;
     setState(() {
       _channels = channels;
-    });
-
-    _controllers.removeWhere((key, controller) {
-      final remove = channels.every((channel) => channel.id != key);
-      if (remove) {
-        controller.dispose();
-      }
-      return remove;
+      final ids = channels.map((c) => c.id).toSet();
+      _uploadsStates.removeWhere((key, _) => !ids.contains(key));
     });
   }
 
   Future<void> _addChannel(String urlOrId) async {
     try {
-      String channelId = await parseChannelId(urlOrId);
-      String channelName = await fetchChannelName(channelId);
+      final resolved = await resolveChannelFromInput(urlOrId);
+      final existing =
+          await DatabaseService.instance.getChannelById(resolved.id);
+      if (existing != null) {
+        // Optionally backfill thumbnail/name if missing.
+        if ((existing.thumbnailUrl.isEmpty && resolved.thumbnailUrl != null) ||
+            (existing.name.isEmpty && resolved.name.isNotEmpty)) {
+          await DatabaseService.instance.updateChannel(
+            Channel(
+              id: existing.id,
+              name: resolved.name.isNotEmpty ? resolved.name : existing.name,
+              description: existing.description,
+              thumbnailUrl:
+                  resolved.thumbnailUrl ?? existing.thumbnailUrl,
+              lastVideoId: existing.lastVideoId,
+              handle: existing.handle,
+              subscriberCount: existing.subscriberCount,
+              hiddenSubscriberCount: existing.hiddenSubscriberCount,
+            ),
+          );
+        }
+        if (!mounted) return;
+        showGlobalSnackBar(
+          SnackBar(
+            content: Text(
+              '${existing.name.isNotEmpty ? existing.name : resolved.name} is already in your library.',
+            ),
+          ),
+        );
+        return;
+      }
       await DatabaseService.instance.addChannel(
         Channel(
-          id: channelId,
-          name: channelName,
+          id: resolved.id,
+          name: resolved.name,
+          thumbnailUrl: resolved.thumbnailUrl ?? '',
           lastVideoId:
               '', // Set empty lastVideoId so background task processes all videos initially
         ),
       );
       await _loadChannels();
-      await _refreshChannel(channelId, forceRefresh: true);
+      await _refreshChannelUploads(resolved.id, force: true);
       if (!mounted) return;
       showGlobalSnackBar(
-        SnackBar(content: Text('Channel added: $channelName')),
+        SnackBar(content: Text('Channel added: ${resolved.name}')),
       );
     } catch (e) {
       if (!mounted) return;
@@ -238,34 +282,60 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
 
   void _onChannelSelected(Channel channel) async {
     await _loadChannels();
-    await _refreshChannel(channel.id, forceRefresh: true);
+    await _refreshChannelUploads(channel.id, force: true);
     if (!mounted) return;
     showGlobalSnackBar(
       SnackBar(content: Text('Channel added: ${channel.name}')),
     );
   }
 
-  void _synchronizeChannelStatesWithCache() {
-    final ids = _channels.map((c) => c.id).toSet();
-    _channelStates.removeWhere((key, _) => !ids.contains(key));
+  _ChannelUploadsState _getUploadsState(String channelId) =>
+      _uploadsStates[channelId] ?? const _ChannelUploadsState();
 
-    for (final channel in _channels) {
-      final cachedVideos = _channelRepository.getCachedVideos(channel.id);
-      final isStale = _channelRepository.isStale(channel.id);
-      final existing = _channelStates[channel.id];
+  void _setUploadsState(String channelId, _ChannelUploadsState state) {
+    if (!mounted) return;
+    setState(() {
+      _uploadsStates[channelId] = state;
+    });
+  }
 
-      if (existing == null) {
-        _channelStates[channel.id] = _ChannelSectionState(
-          videos: cachedVideos,
-          isLoadingInitial: cachedVideos.isEmpty,
-          isStale: isStale,
-        );
-      } else {
-        _channelStates[channel.id] = existing.copyWith(
-          videos: cachedVideos.isNotEmpty ? cachedVideos : existing.videos,
-          isStale: isStale,
-        );
+  Future<void> _loadCachedUploads(String channelId) async {
+    final existing = _getUploadsState(channelId);
+    if (existing.uploads.isEmpty && !existing.isLoading) {
+      _setUploadsState(
+        channelId,
+        existing.copyWith(isLoading: true, errorMessage: null),
+      );
+    }
+
+    try {
+      final cached = await _uploadsRepo.getCachedUploads(channelId);
+      final meta = await _uploadsRepo.getCacheMeta(channelId);
+      if (!mounted) return;
+      final isStale = _uploadsRepo.isStale(meta?.lastFetchedAt);
+      _setUploadsState(
+        channelId,
+        _getUploadsState(channelId).copyWith(
+              uploads: cached,
+              isLoading: false,
+              isStale: isStale,
+              lastFetchedAt: meta?.lastFetchedAt,
+              errorMessage: null,
+            ),
+      );
+      if (isStale) {
+        await _refreshChannelUploads(channelId, force: false);
       }
+    } catch (_) {
+      if (!mounted) return;
+      _setUploadsState(
+        channelId,
+        _getUploadsState(channelId).copyWith(
+              isLoading: false,
+              isRefreshing: false,
+              errorMessage: 'Failed to load cached uploads.',
+            ),
+      );
     }
   }
 
@@ -278,7 +348,8 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     try {
       await Future.wait(
         _channels.map(
-          (channel) => _refreshChannel(channel.id, forceRefresh: forceRefresh),
+          (channel) =>
+              _refreshChannelUploads(channel.id, force: forceRefresh),
         ),
       );
     } finally {
@@ -289,30 +360,69 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     }
   }
 
-  Future<void> _refreshChannel(String channelId, {bool forceRefresh = false}) {
+  Future<void> _refreshChannelUploads(
+    String channelId, {
+    bool force = false,
+  }) {
     final inFlight = _channelRefreshes[channelId];
     if (inFlight != null) return inFlight;
 
-    final controller = _controllers.putIfAbsent(
-      channelId,
-      () => ChannelUploadsController(api: _ytService, channelId: channelId),
-    );
-
     final future = () async {
-      controller.reset();
-      await controller.ensureInitialized();
+      final current = _getUploadsState(channelId);
+      _setUploadsState(
+        channelId,
+        current.copyWith(
+          isRefreshing: true,
+          isLoading: current.uploads.isEmpty,
+          errorMessage: null,
+        ),
+      );
+
+      try {
+        final refreshed = await _uploadsRepo.refreshFromRss(
+          channelId,
+          forceRefresh: force,
+        );
+        if (!mounted) return;
+        _setUploadsState(
+          channelId,
+          _getUploadsState(channelId).copyWith(
+                uploads: refreshed,
+                isLoading: false,
+                isRefreshing: false,
+                isStale: false,
+                lastFetchedAt: DateTime.now().toUtc(),
+                errorMessage: null,
+              ),
+        );
+      } on FetchException catch (e) {
+        if (!mounted) return;
+        _setUploadsState(
+          channelId,
+          _getUploadsState(channelId).copyWith(
+                isLoading: false,
+                isRefreshing: false,
+                isStale: true,
+                errorMessage: e.message,
+              ),
+        );
+      } catch (_) {
+        if (!mounted) return;
+        _setUploadsState(
+          channelId,
+          _getUploadsState(channelId).copyWith(
+                isLoading: false,
+                isRefreshing: false,
+                isStale: true,
+                errorMessage: 'Unable to refresh this channel right now.',
+              ),
+        );
+      }
     }();
 
     _channelRefreshes[channelId] = future;
     return future.whenComplete(() {
       _channelRefreshes.remove(channelId);
-    });
-  }
-
-  void _setChannelState(String channelId, _ChannelSectionState state) {
-    if (!mounted) return;
-    setState(() {
-      _channelStates[channelId] = state;
     });
   }
 
@@ -400,23 +510,298 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     );
   }
 
-  String _describeChannelMessage(
-    _ChannelSectionState state,
-    FetchException? error,
+  Widget _buildChannelCard(Channel channel) {
+    final uploadsState = _getUploadsState(channel.id);
+    final bool isInitialLoading =
+        uploadsState.isLoading && uploadsState.uploads.isEmpty;
+    final bool hasVideos = uploadsState.uploads.isNotEmpty;
+    final bool inlineBusy =
+        uploadsState.isRefreshing || _isRefreshingAll;
+    final errorMessage = uploadsState.errorMessage;
+    final bool isStale = uploadsState.isStale;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Card(
+        elevation: 3,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+        ),
+        margin: EdgeInsets.zero,
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 8,
+          ),
+          childrenPadding: const EdgeInsets.symmetric(
+            horizontal: 8,
+            vertical: 8,
+          ),
+          onExpansionChanged: (open) {
+            if (open) {
+              _loadCachedUploads(channel.id);
+            }
+          },
+          title: Row(
+            children: [
+              CircleAvatar(
+                backgroundImage:
+                    channel.thumbnailUrl.isNotEmpty
+                        ? NetworkImage(channel.thumbnailUrl)
+                        : null,
+                backgroundColor: Colors.red[100],
+                radius: 20,
+                child: channel.thumbnailUrl.isEmpty
+                    ? Icon(
+                        Icons.person,
+                        color: Colors.red[700],
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  channel.name,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isStale)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Icon(
+                    Icons.update,
+                    size: 18,
+                    color: Colors.orange.shade700,
+                  ),
+                ),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: 'Refresh',
+                onPressed: inlineBusy
+                    ? null
+                    : () => _refreshChannelUploads(
+                          channel.id,
+                          force: true,
+                        ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline),
+                tooltip: 'Remove Channel',
+                onPressed: () async {
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Remove Channel'),
+                      content: const Text(
+                        'Are you sure you want to remove this channel?',
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(false),
+                          child: const Text('Cancel'),
+                        ),
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(true),
+                          child: const Text('Yes'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirm == true) {
+                    await DatabaseService.instance.deleteChannel(channel.id);
+                    setState(() {
+                      _channelRefreshes.remove(channel.id);
+                      _uploadsStates.remove(channel.id);
+                    });
+                    await _loadChannels();
+                    if (!mounted) return;
+                    showGlobalSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Channel removed: ${channel.name}',
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
+            ],
+          ),
+          children: [
+            if (isInitialLoading)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else if (!hasVideos)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (errorMessage != null && errorMessage.isNotEmpty) ...[
+                      Text(
+                        errorMessage,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey[800],
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        _isOnline
+                            ? 'Tap Retry to try again.'
+                            : "You're offline. Pull to refresh after reconnecting.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey[700],
+                        ),
+                      ),
+                    ] else
+                      Text(
+                        'No videos available yet.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey[700],
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    _buildInlineActionButton(
+                      label: 'Retry',
+                      isBusy: inlineBusy,
+                      onPressed: inlineBusy
+                          ? null
+                          : () => _refreshChannelUploads(
+                                channel.id,
+                                force: true,
+                              ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (uploadsState.isRefreshing)
+                    const LinearProgressIndicator(
+                      minHeight: 2,
+                    )
+                  else if (isStale)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 4,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            size: 18,
+                            color: Colors.orange.shade700,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Showing cached uploads. Refreshing in background...',
+                              style: TextStyle(
+                                color: Colors.orange.shade700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    separatorBuilder: (_, __) => Divider(
+                      height: 1,
+                      color: Colors.grey[200],
+                    ),
+                    itemCount: uploadsState.uploads.length,
+                    itemBuilder: (context, j) {
+                      final item = uploadsState.uploads[j];
+                      final video = _mapUploadToVideo(
+                        item,
+                        channel,
+                      );
+                      return ChannelVideoTile(
+                        key: ValueKey(item.videoId),
+                        video: video,
+                      );
+                    },
+                  ),
+                  if (errorMessage != null && errorMessage.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            color: Colors.orange.shade700,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Last refresh failed. Showing cached uploads.',
+                              style: TextStyle(
+                                color: Colors.orange.shade700,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: inlineBusy
+                                ? null
+                                : () => _refreshChannelUploads(
+                                      channel.id,
+                                      force: true,
+                                    ),
+                            child: const Text('Retry'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(height: 4),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Video _mapUploadToVideo(
+    ChannelUploadCacheEntry entry,
+    Channel channel,
   ) {
-    if (error != null) {
-      if (error.isOffline) {
-        return "You're offline. Pull to refresh after reconnecting.";
-      }
-      if (error.message.isNotEmpty) {
-        return error.message;
-      }
-      return 'Unable to refresh videos right now.';
-    }
-    if (state.isStale) {
-      return 'Last refresh failed. Pull to refresh.';
-    }
-    return 'No videos found.';
+    final thumb = entry.thumbnailUrl.isNotEmpty
+        ? entry.thumbnailUrl
+        : 'https://i.ytimg.com/vi/${entry.videoId}/hqdefault.jpg';
+    return Video(
+      id: entry.videoId,
+      title: entry.title,
+      published: entry.publishedAt ?? DateTime.now().toUtc(),
+      thumbnailUrl: thumb,
+      channelName: channel.name,
+      channelId: channel.id,
+    );
   }
 
   @override
@@ -428,6 +813,8 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
     final contentBottomPadding = keyboardVisible ? 0.0 : safe;
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final settings = context.watch<AppSettingsNotifier>();
+    final enableApiSearch = settings.enableApiSearch;
 
     return Scaffold(
       key: _scaffoldKey,
@@ -467,6 +854,11 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                   ),
                   actions: [
                     IconButton(
+                      tooltip: 'Add',
+                      icon: const Icon(Icons.add),
+                      onPressed: _openAddScreen,
+                    ),
+                    IconButton(
                       tooltip: 'Downloads',
                       icon: const Icon(Icons.download),
                       onPressed: _openDownloads,
@@ -483,10 +875,14 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                     child: Row(
                       children: [
                         Expanded(
-                          child: _SearchBarContainer(
-                            onChannelSelected: _onChannelSelected,
-                            onManualAdd: _addChannel,
-                          ),
+                          child: enableApiSearch
+                              ? _SearchBarContainer(
+                                  onChannelSelected: _onChannelSelected,
+                                  onManualAdd: _addChannel,
+                                )
+                              : _ApiSearchDisabledNotice(
+                                  onAdd: _openAddScreen,
+                                ),
                         ),
                       ],
                     ),
@@ -527,333 +923,7 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
                     itemCount: _channels.length,
                     itemBuilder: (context, i) {
                       final channel = _channels[i];
-                      final controller = _controllers.putIfAbsent(
-                        channel.id,
-                        () => ChannelUploadsController(
-                          api: _ytService,
-                          channelId: channel.id,
-                        ),
-                      );
-
-                      return AnimatedBuilder(
-                        animation: controller,
-                        builder: (context, _) {
-                          final videos = controller.videos;
-                          final bool isInitialLoading =
-                              controller.isInitializing && videos.isEmpty;
-                          final bool hasVideos = videos.isNotEmpty;
-                          final bool inlineBusy =
-                              controller.isInitializing ||
-                              controller.isLoadingMore ||
-                              _isRefreshingAll;
-                          final error = controller.error;
-                          final bool hasError = error != null;
-                          final bool isOfflineError = error?.isOffline ?? false;
-                          final String? errorTitle = hasError
-                              ? (isOfflineError
-                                    ? "You're offline"
-                                    : "Couldn't refresh this channel.")
-                              : null;
-                          final String? errorBody = hasError
-                              ? (isOfflineError
-                                    ? 'Connect to the internet and tap Retry to refresh this channel.'
-                                    : 'Please try again later.')
-                              : null;
-
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            child: Card(
-                              elevation: 3,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16),
-                              ),
-                              margin: EdgeInsets.zero,
-                              child: ExpansionTile(
-                                tilePadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 8,
-                                ),
-                                childrenPadding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 8,
-                                ),
-                                onExpansionChanged: (open) {
-                                  if (open) {
-                                    controller.ensureInitialized();
-                                  } else {
-                                    controller.reset();
-                                  }
-                                },
-                                title: Row(
-                                  children: [
-                                    CircleAvatar(
-                                      backgroundImage:
-                                          channel.thumbnailUrl.isNotEmpty
-                                          ? NetworkImage(channel.thumbnailUrl)
-                                          : null,
-                                      backgroundColor: Colors.red[100],
-                                      radius: 20,
-                                      child: channel.thumbnailUrl.isEmpty
-                                          ? Icon(
-                                              Icons.person,
-                                              color: Colors.red[700],
-                                            )
-                                          : null,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Text(
-                                        channel.name,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 18,
-                                        ),
-                                        overflow: TextOverflow.ellipsis,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.refresh),
-                                      tooltip: 'Refresh',
-                                      onPressed: inlineBusy
-                                          ? null
-                                          : () => _refreshChannel(
-                                              channel.id,
-                                              forceRefresh: true,
-                                            ),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete_outline),
-                                      tooltip: 'Remove Channel',
-                                      onPressed: () async {
-                                        final confirm = await showDialog<bool>(
-                                          context: context,
-                                          builder: (context) => AlertDialog(
-                                            title: const Text('Remove Channel'),
-                                            content: const Text(
-                                              'Are you sure you want to remove this channel?',
-                                            ),
-                                            actions: [
-                                              TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(false),
-                                                child: const Text('Cancel'),
-                                              ),
-                                              TextButton(
-                                                onPressed: () => Navigator.of(
-                                                  context,
-                                                ).pop(true),
-                                                child: const Text('Yes'),
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                        if (confirm == true) {
-                                          await DatabaseService.instance
-                                              .deleteChannel(channel.id);
-                                          setState(() {
-                                            _controllers
-                                                .remove(channel.id)
-                                                ?.dispose();
-                                            _channelRefreshes.remove(
-                                              channel.id,
-                                            );
-                                          });
-                                          await _loadChannels();
-                                          if (!mounted) return;
-                                          showGlobalSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                'Channel removed: ${channel.name}',
-                                              ),
-                                            ),
-                                          );
-                                        }
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                children: [
-                                  if (isInitialLoading)
-                                    const Padding(
-                                      padding: EdgeInsets.all(16),
-                                      child: Center(
-                                        child: CircularProgressIndicator(),
-                                      ),
-                                    )
-                                  else if (!hasVideos)
-                                    Padding(
-                                      padding: const EdgeInsets.all(16),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (errorTitle != null) ...[
-                                            Text(
-                                              errorTitle,
-                                              textAlign: TextAlign.center,
-                                              style: TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w600,
-                                                color: Colors.grey[800],
-                                              ),
-                                            ),
-                                            const SizedBox(height: 6),
-                                            Text(
-                                              errorBody ?? '',
-                                              textAlign: TextAlign.center,
-                                              style: TextStyle(
-                                                color: Colors.grey[700],
-                                              ),
-                                            ),
-                                          ] else
-                                            Text(
-                                              'No videos available yet.',
-                                              textAlign: TextAlign.center,
-                                              style: TextStyle(
-                                                color: Colors.grey[700],
-                                              ),
-                                            ),
-                                          if (hasError)
-                                            const SizedBox(height: 12),
-                                          if (hasError)
-                                            _buildInlineActionButton(
-                                              label: 'Retry',
-                                              isBusy: inlineBusy,
-                                              onPressed: inlineBusy
-                                                  ? null
-                                                  : () => _refreshChannel(
-                                                      channel.id,
-                                                      forceRefresh: true,
-                                                    ),
-                                            ),
-                                        ],
-                                      ),
-                                    )
-                                  else
-                                    Column(
-                                      children: [
-                                        NotificationListener<
-                                          ScrollNotification
-                                        >(
-                                          onNotification: (notification) {
-                                            if (notification
-                                                    is ScrollUpdateNotification &&
-                                                controller.hasMore &&
-                                                !controller.isLoadingMore &&
-                                                controller.error == null &&
-                                                notification.metrics.pixels >=
-                                                    notification
-                                                            .metrics
-                                                            .maxScrollExtent -
-                                                        400) {
-                                              controller.loadNextPage();
-                                            }
-                                            return false;
-                                          },
-                                          child: ListView.separated(
-                                            shrinkWrap: true,
-                                            physics:
-                                                const NeverScrollableScrollPhysics(),
-                                            separatorBuilder: (_, __) =>
-                                                Divider(
-                                                  height: 1,
-                                                  color: Colors.grey[200],
-                                                ),
-                                            itemCount: videos.length,
-                                            itemBuilder: (context, j) {
-                                              final item = videos[j];
-                                              final convertedVideo = Video(
-                                                id: item.videoId,
-                                                title: item.title,
-                                                published: item.publishedAt,
-                                                thumbnailUrl:
-                                                    item.thumbnailUrl ?? '',
-                                                channelName: channel.name,
-                                                channelId: item.channelId,
-                                              );
-                                              return ChannelVideoTile(
-                                                key: ValueKey(item.videoId),
-                                                video: convertedVideo,
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                        if (controller.isLoadingMore)
-                                          const Padding(
-                                            padding: EdgeInsets.symmetric(
-                                              vertical: 12,
-                                            ),
-                                            child: Center(
-                                              child: SizedBox(
-                                                width: 18,
-                                                height: 18,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              ),
-                                            ),
-                                          )
-                                        else if (controller.error != null)
-                                          Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 8,
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.info_outline,
-                                                  color: Colors.orange.shade700,
-                                                ),
-                                                const SizedBox(width: 8),
-                                                Expanded(
-                                                  child: Text(
-                                                    'Failed to load more videos.',
-                                                    style: TextStyle(
-                                                      color: Colors
-                                                          .orange
-                                                          .shade700,
-                                                    ),
-                                                  ),
-                                                ),
-                                                TextButton(
-                                                  onPressed: inlineBusy
-                                                      ? null
-                                                      : () => controller
-                                                            .loadNextPage(),
-                                                  child: const Text('Retry'),
-                                                ),
-                                              ],
-                                            ),
-                                          )
-                                        else if (controller.hasMore)
-                                          Padding(
-                                            padding: const EdgeInsets.only(
-                                              top: 8,
-                                              bottom: 4,
-                                            ),
-                                            child: TextButton(
-                                              onPressed: inlineBusy
-                                                  ? null
-                                                  : () => controller
-                                                        .loadNextPage(),
-                                              child: const Text('Load more'),
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
-                      );
+                      return _buildChannelCard(channel);
                     },
                   ),
                 const SliverToBoxAdapter(child: SizedBox(height: 16)),
@@ -866,35 +936,87 @@ class _ChannelManagementScreenState extends State<ChannelManagementScreen>
   }
 }
 
-class _ChannelSectionState {
-  const _ChannelSectionState({
-    this.videos = const [],
-    this.isLoadingInitial = false,
+class _ChannelUploadsState {
+  const _ChannelUploadsState({
+    this.uploads = const [],
+    this.isLoading = false,
     this.isRefreshing = false,
     this.isStale = false,
-    this.lastError,
+    this.lastFetchedAt,
+    this.errorMessage,
   });
 
-  final List<Video> videos;
-  final bool isLoadingInitial;
+  final List<ChannelUploadCacheEntry> uploads;
+  final bool isLoading;
   final bool isRefreshing;
   final bool isStale;
-  final FetchException? lastError;
+  final DateTime? lastFetchedAt;
+  final String? errorMessage;
 
-  _ChannelSectionState copyWith({
-    List<Video>? videos,
-    bool? isLoadingInitial,
+  _ChannelUploadsState copyWith({
+    List<ChannelUploadCacheEntry>? uploads,
+    bool? isLoading,
     bool? isRefreshing,
     bool? isStale,
-    FetchException? lastError,
-    bool clearError = false,
+    DateTime? lastFetchedAt,
+    String? errorMessage,
   }) {
-    return _ChannelSectionState(
-      videos: videos ?? this.videos,
-      isLoadingInitial: isLoadingInitial ?? this.isLoadingInitial,
+    return _ChannelUploadsState(
+      uploads: uploads ?? this.uploads,
+      isLoading: isLoading ?? this.isLoading,
       isRefreshing: isRefreshing ?? this.isRefreshing,
       isStale: isStale ?? this.isStale,
-      lastError: clearError ? null : lastError ?? this.lastError,
+      lastFetchedAt: lastFetchedAt ?? this.lastFetchedAt,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+class _ApiSearchDisabledNotice extends StatelessWidget {
+  const _ApiSearchDisabledNotice({required this.onAdd});
+
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceVariant,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.search_off),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Search disabled to save API quota.',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Use Add to paste a channel or video link.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurface.withOpacity(0.7),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          OutlinedButton(
+            onPressed: onAdd,
+            child: const Text('Add'),
+          ),
+        ],
+      ),
     );
   }
 }

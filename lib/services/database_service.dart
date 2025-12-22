@@ -8,6 +8,7 @@ import '../utils/constants.dart';
 import 'package:synchronized/synchronized.dart';
 import '../models/saved_video.dart';
 import '../models/stream_cache_entry.dart';
+import '../models/channel_upload_cache_entry.dart';
 
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._init();
@@ -26,7 +27,7 @@ class DatabaseService {
     final path = join(dbPath, kAppDbName);
     return await openDatabase(
       path,
-      version: 5,
+      version: 6,
       onCreate: _createDB,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -68,6 +69,9 @@ class DatabaseService {
             'ALTER TABLE saved_videos ADD COLUMN lastStreamUrlUpdatedAt TEXT',
           );
           await _createStreamCacheTable(db);
+        }
+        if (oldVersion < 6) {
+          await _createChannelUploadsCacheTable(db);
         }
       },
     );
@@ -117,6 +121,7 @@ class DatabaseService {
     ''');
     await _createSavedVideosTable(db);
     await _createStreamCacheTable(db);
+    await _createChannelUploadsCacheTable(db);
   }
 
   Future<void> _createSavedVideosTable(Database db) async {
@@ -155,11 +160,48 @@ class DatabaseService {
     ''');
   }
 
+  Future<void> _createChannelUploadsCacheTable(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS channel_uploads_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channelId TEXT NOT NULL,
+        videoId TEXT NOT NULL,
+        title TEXT,
+        publishedAt INTEGER,
+        thumbnailUrl TEXT,
+        cachedAt INTEGER,
+        UNIQUE(channelId, videoId)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_channel_uploads_channel ON channel_uploads_cache(channelId)',
+    );
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS channel_cache_meta (
+        channelId TEXT PRIMARY KEY,
+        lastFetchedAt INTEGER
+      )
+    ''');
+  }
+
   // Channel CRUD
   @pragma('vm:entry-point')
   Future<void> addChannel(Channel channel) async {
     final dbClient = await db;
     await dbClient.insert('channels', channel.toMap(), conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  @pragma('vm:entry-point')
+  Future<Channel?> getChannelById(String channelId) async {
+    final dbClient = await db;
+    final maps = await dbClient.query(
+      'channels',
+      where: 'id = ?',
+      whereArgs: [channelId],
+      limit: 1,
+    );
+    if (maps.isEmpty) return null;
+    return Channel.fromMap(maps.first);
   }
 
   @pragma('vm:entry-point')
@@ -434,6 +476,73 @@ class DatabaseService {
           conflictAlgorithm: ConflictAlgorithm.replace,
         );
       }
+    });
+  }
+
+  Future<List<ChannelUploadCacheEntry>> getChannelUploadsCache(
+    String channelId,
+  ) async {
+    return await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      final rows = await dbClient.query(
+        'channel_uploads_cache',
+        where: 'channelId = ?',
+        whereArgs: [channelId],
+        orderBy: 'publishedAt DESC, cachedAt DESC',
+      );
+      return rows.map(ChannelUploadCacheEntry.fromMap).toList(growable: false);
+    });
+  }
+
+  Future<ChannelCacheMeta?> getChannelCacheMeta(String channelId) async {
+    return await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      final rows = await dbClient.query(
+        'channel_cache_meta',
+        where: 'channelId = ?',
+        whereArgs: [channelId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      final lastFetchedAtMs = rows.first['lastFetchedAt'] as int?;
+      if (lastFetchedAtMs == null) return null;
+      return ChannelCacheMeta(
+        channelId: channelId,
+        lastFetchedAt:
+            DateTime.fromMillisecondsSinceEpoch(lastFetchedAtMs, isUtc: true),
+      );
+    });
+  }
+
+  Future<void> saveChannelUploadsCache(
+    String channelId,
+    List<ChannelUploadCacheEntry> uploads,
+    DateTime fetchedAt,
+  ) async {
+    await _dbLock.synchronized(() async {
+      final dbClient = await db;
+      await dbClient.transaction((txn) async {
+        await txn.delete(
+          'channel_uploads_cache',
+          where: 'channelId = ?',
+          whereArgs: [channelId],
+        );
+        for (final upload in uploads) {
+          await txn.insert(
+            'channel_uploads_cache',
+            upload.toMap(),
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+        await txn.insert(
+          'channel_cache_meta',
+          {
+            'channelId': channelId,
+            'lastFetchedAt': fetchedAt.millisecondsSinceEpoch,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      });
     });
   }
 
